@@ -11,7 +11,7 @@ OXC=/opt/openxechain/sysroot bash build.sh
 
 | Output | What |
 |---|---|
-| `out/xa.xex` | The driver, a system DLL at `0x91E00000` |
+| `out/xa.xex` | The driver, a system DLL at `0x91500000` |
 | `out/xa_loader.xex` | A development loader: a title that loads the plugin without a reboot, then launches Aurora |
 | `out/xa_m3.xex` | A minimal probe that claims the adapter and reads two registers (bring-up aid) |
 

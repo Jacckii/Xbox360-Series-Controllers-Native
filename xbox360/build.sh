@@ -3,7 +3,7 @@
 # Builds the Xbox 360 side with OpenXeChain. Run in this folder on the toolchain host:
 #   OXC=/path/to/openxechain/sysroot bash build.sh
 #
-#   out/xa.xex         the driver (system DLL at 0x91E00000)
+#   out/xa.xex         the driver (system DLL at 0x91500000)
 #   out/xa_loader.xex  development loader for it
 #   out/xa_m3.xex      a register probe for bring-up (system DLL at 0x91D00000)
 set -euo pipefail
@@ -32,11 +32,16 @@ esac
 # XA_SLOT=n: build the plugin as out/xa<n>.xex at its own base, and the loader for it, so
 # a new build can replace a running one without a reboot (xa.py reload). A loaded
 # module's name and address can't be reused until the console reboots. Slot 0 (default)
-# is xa.xex at 0x91E00000; slot n is xa<n>.xex at 0x92000000 + (n-1) MB.
+# is xa.xex at 0x91500000; slot n is xa<n>.xex at 0x92000000 + (n-1) MB.
+#
+# A system DLL only loads at its own base, so it must not overlap another plugin's.
+# 0x91B00000-0x91E70000 is crowded (RPC360 and others sit at 0x91E00000, connectx at
+# 0x91E60000); the gap between hud.xex (ends 0x91429000) and ximecore.xex (0x91680000)
+# is unused by system modules and known plugins.
 SLOT=${XA_SLOT:-0}
 if [ "$SLOT" = 0 ]; then
     NAME=xa
-    BASE=0x91E00000
+    BASE=0x91500000
 else
     NAME=xa$SLOT
     BASE=$(printf "0x%08X" $((0x92000000 + (SLOT - 1) * 0x100000)))
