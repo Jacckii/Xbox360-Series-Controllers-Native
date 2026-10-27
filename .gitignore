@@ -1,0 +1,13 @@
+# build output
+out/
+*.exe
+*.basefile
+*.o
+# Microsoft adapter firmware: never commit it
+*.bin
+# get-firmware.ps1 output
+/Apps/
+linux/xadapter
+linux/uECC.o
+__pycache__/
+*.pyc
