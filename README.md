@@ -62,14 +62,16 @@ flowchart LR
    It downloads Microsoft's driver package from Windows Update, checks the firmware's SHA-256
    and saves it as `Apps\xadapter\xone_dongle_02fe.bin`. On Linux, copy xone's
    `/lib/firmware/xone_dongle_02fe.bin` into `Apps\xadapter\` instead.
-3. Copy the `Apps` folder to the root of the console's USB stick, so it has:
+3. Copy the `Apps` folder to the root of the console's USB stick or HDD, so it has:
 
    ```
    Usb:\Apps\xadapter\xa.xex
    Usb:\Apps\xadapter\xone_dongle_02fe.bin
    ```
 
-4. Add the plugin to a free slot in `launch.ini`:
+   (or the same under `Hdd:\`). The firmware just has to sit next to `xa.xex`; the plugin
+   also checks `Apps\xadapter\` on the HDD and every USB drive.
+4. Add the plugin to a free slot in `launch.ini`, with the path you copied it to:
 
    ```ini
    [Plugins]
@@ -103,7 +105,7 @@ dashboard is up, *Wireless adapter: ready*.
 **How do I install this plugin?**
 
 Extract the release zip, run `get-firmware.ps1` to fetch the adapter firmware, copy the `Apps`
-folder to the console's USB stick, add `Usb:\Apps\xadapter\xa.xex` to a free `pluginN` line in
+folder to the console's USB stick or HDD, add `Usb:\Apps\xadapter\xa.xex` (or `Hdd:\...`) to a free `pluginN` line in
 `launch.ini`, plug in the adapter and restart. The console needs kernel 17559 with BadUpdate + XeUnshackle (or anything
 else that loads `launch.ini` plugins). Step by step: [Installation](#-installation).
 

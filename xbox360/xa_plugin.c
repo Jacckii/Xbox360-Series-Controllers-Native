@@ -4,7 +4,7 @@
  *
  * A class driver linked into the kernel's runtime USB driver list claims the adapter
  * (045e:02fe). AddDevice opens its endpoints; a driver thread then runs the portable
- * core (core/): firmware upload from the USB stick, radio, pairing, controllers.
+ * core (core/): firmware upload (the file next to xa.xex), radio, pairing, controllers.
  * Controller state lands in g_xa.pads; g_xa and the log ring are read over xbdm.
  *
  * Kernel context rules (see docs/INTERNALS.md): every kernel -> plugin call goes through
@@ -29,8 +29,25 @@
 #define EP_IN_WLAN (XA_MT_EP_IN_WLAN | 0x80)
 #define EP_MAX_PACKET 512
 
-#define FIRMWARE_PATH "\\Device\\Mass0\\Apps\\xadapter\\xone_dongle_02fe.bin"
+/* the firmware is looked for next to xa.xex first, then in Apps\xadapter on the HDD and
+ * each USB drive */
+#define FIRMWARE_NAME "xone_dongle_02fe.bin"
+#define FIRMWARE_DIR "\\Apps\\xadapter\\"
+#define FIRMWARE_PATH_MAX 260
 #define FIRMWARE_MAX 0x20000
+static const char *const firmware_roots[] = {
+	"\\Device\\Harddisk0\\Partition1", "\\Device\\Mass0", "\\Device\\Mass1", "\\Device\\Mass2",
+};
+/* LDR_DATA_TABLE_ENTRY, as far as the module's full path (the module handle points to it) */
+struct ldr_entry {
+	u32 links[6];
+	void *nt_headers;
+	u8 *image_base;
+	u32 image_size;
+	u16 full_name_length; /* bytes */
+	u16 full_name_max;
+	const u16 *full_name;
+};
 
 /* ExCreateThread: system thread, pinned to hw thread 2 (affinity mask in the top byte) */
 #define THREAD_FLAGS (0x2 | (1u << 2) << 24)
@@ -78,7 +95,7 @@
 #define TITLE_WAIT_MS 60000  /* no switch seen by then: go ahead anyway */
 #define TITLE_SETTLE_MS 8000 /* the new title unchanged this long */
 #define RESCAN_WAIT_MS 10000
-/* at boot the USB stick or XAM may not be ready the moment launch.xex loads us */
+/* at boot the drives or XAM may not be ready the moment launch.xex loads us */
 #define BOOT_RETRY_MS 30000
 
 /* after the firmware starts, how long the 360 gets to notice the chip re-enumerating */
@@ -442,9 +459,10 @@ static const struct xa_dongle_ops dongle_ops = {
 
 /* ---- driver thread ------------------------------------------------------------------------- */
 
-static u8 *load_firmware(u32 *len)
+/* the firmware at path, or NULL (*status: why) */
+static u8 *load_firmware_at(const char *path, u32 *len, NTSTATUS *status)
 {
-	ANSI_STRING name = { sizeof(FIRMWARE_PATH) - 1, sizeof(FIRMWARE_PATH), (char *)FIRMWARE_PATH };
+	ANSI_STRING name = { (u16)strlen(path), (u16)(strlen(path) + 1), (char *)path };
 	OBJECT_ATTRIBUTES attrs = { 0, &name, OBJ_CASE_INSENSITIVE };
 	IO_STATUS_BLOCK io;
 	HANDLE file;
@@ -455,11 +473,9 @@ static u8 *load_firmware(u32 *len)
 	/* GENERIC_READ | SYNCHRONIZE, FILE_SHARE_READ, FILE_OPEN,
 	 * FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE */
 	st = NtCreateFile(&file, 0x80100000, &attrs, &io, 0, 0x80, 1, 1, 0x60);
-	if ((s32)st < 0) {
-		g_xa.last_error = st;
-		xa_log("xa: cannot open %s: %08x\n", FIRMWARE_PATH, (u32)st);
+	*status = st;
+	if ((s32)st < 0)
 		return NULL;
-	}
 	buf = malloc(FIRMWARE_MAX);
 	while (buf && total < FIRMWARE_MAX) {
 		int64_t offset = total;
@@ -471,8 +487,81 @@ static u8 *load_firmware(u32 *len)
 	}
 	NtClose(file);
 	*len = total;
-	xa_log("xa: firmware %u bytes\n", total);
+	xa_log("xa: firmware %u bytes from %s\n", total, path);
 	return buf;
+}
+
+/* appends s to the path at out (n: its length so far); the new length, or -1 if too long */
+static int path_append(char *out, int n, const char *s)
+{
+	while (*s) {
+		if (n >= FIRMWARE_PATH_MAX - 1)
+			return -1;
+		out[n++] = *s++;
+	}
+	out[n] = 0;
+	return n;
+}
+
+/* the folder xa.xex was loaded from, with a trailing backslash, from our loader entry. Only a
+ * \Device\ path inside an entry that really describes this image is trusted; 0 = unknown. */
+static int module_dir(char *out)
+{
+	const struct ldr_entry *e = (const struct ldr_entry *)g_self;
+	int n, slash = -1;
+
+	if (!e || !e->full_name || (u8 *)&g_xa < e->image_base ||
+	    (u8 *)&g_xa >= e->image_base + e->image_size)
+		return 0;
+	n = e->full_name_length / 2;
+	if (n < 9 || n >= FIRMWARE_PATH_MAX)
+		return 0;
+	for (int i = 0; i < n; i++) {
+		if (e->full_name[i] > 0x7e || e->full_name[i] < 0x20)
+			return 0;
+		out[i] = (char)e->full_name[i];
+		if (out[i] == '\\')
+			slash = i;
+	}
+	out[n] = 0;
+	if (memcmp(out, "\\Device\\", 8) || slash < 0)
+		return 0;
+	out[slash + 1] = 0;
+	return slash + 1;
+}
+
+/* the firmware from the first place that has it; NULL if none does. The places tried are
+ * logged the first time only, as the boot retries call this every second. */
+static u8 *load_firmware(u32 *len)
+{
+	static bool logged;
+	char path[FIRMWARE_PATH_MAX];
+	NTSTATUS st;
+	u8 *fw;
+	int n;
+
+	n = module_dir(path);
+	if (n > 0 && path_append(path, n, FIRMWARE_NAME) > 0) {
+		if ((fw = load_firmware_at(path, len, &st)))
+			return fw;
+		if (!logged)
+			xa_log("xa: no firmware at %s (%08x)\n", path, (u32)st);
+	} else if (!logged) {
+		xa_log("xa: own path unknown, trying the default folders\n");
+	}
+	for (unsigned int i = 0; i < ARRAY_SIZE(firmware_roots); i++) {
+		n = path_append(path, 0, firmware_roots[i]);
+		if (n < 0 || (n = path_append(path, n, FIRMWARE_DIR)) < 0 ||
+		    path_append(path, n, FIRMWARE_NAME) < 0)
+			continue;
+		if ((fw = load_firmware_at(path, len, &st)))
+			return fw;
+		g_xa.last_error = st;
+		if (!logged)
+			xa_log("xa: no firmware at %s (%08x)\n", path, (u32)st);
+	}
+	logged = true;
+	return NULL;
 }
 
 /* xbdm commands, checked wherever the thread waits */
@@ -814,7 +903,7 @@ BODY u32 XaThreadC(void *context)
 	(void)context;
 	xa_log("xa: driver thread started\n");
 	raise_priority();
-	/* as a boot plugin we can be up before XAM or the USB stick: retry those */
+	/* as a boot plugin we can be up before XAM or the drives: retry those */
 	for (unsigned int ms = 0; xa_xinput_init() == -XA_ENODEV && ms < BOOT_RETRY_MS; ms += 1000)
 		wait_ms(1000);
 	for (unsigned int ms = 0; !(fw = load_firmware(&fw_len)) && ms < BOOT_RETRY_MS; ms += 1000)
