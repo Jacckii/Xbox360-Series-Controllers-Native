@@ -18,6 +18,7 @@ $hash = '48084D9FA53B9BB04358F3BB127B7495DC8F7BB0B3CA1437BD24EF2B6EABDF66'
 $dest = Join-Path $PSScriptRoot 'Apps\xadapter\xone_dongle_02fe.bin'
 $tmp  = Join-Path ([IO.Path]::GetTempPath()) ('xadapter-' + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $tmp | Out-Null
+$ok = $false
 try {
     Write-Host 'Downloading the adapter driver package from Microsoft...'
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -33,6 +34,17 @@ try {
     New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
     Move-Item -Force (Join-Path $tmp $file) $dest
     Write-Host "Saved $dest"
+    $ok = $true
+} catch {
+    Write-Host "Failed: $_" -ForegroundColor Red
 } finally {
     Remove-Item -Recurse -Force $tmp
 }
+
+# keep the window open when started by double-click
+if ($ok) {
+    Write-Host ''
+    Write-Host 'Done. Copy the Apps folder to your console.' -ForegroundColor Green
+}
+Read-Host 'Press Enter to close' | Out-Null
+if (-not $ok) { exit 1 }
