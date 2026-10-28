@@ -7,7 +7,8 @@
 # The firmware is subject to Microsoft's Terms of Use:
 # https://www.microsoft.com/en-us/legal/terms-of-use
 #
-# Run:  powershell -ExecutionPolicy Bypass -File get-firmware.ps1
+# Run:  double-click get-firmware.cmd, or
+#       powershell -ExecutionPolicy Bypass -File get-firmware.ps1
 $ErrorActionPreference = 'Stop'
 
 $url  = 'https://catalog.s.download.windowsupdate.com/c/msdownload/update/driver/drvs/2017/07/1cd6a87c-623f-4407-a52d-c31be49e925c_e19f60808bdcbfbd3c3df6be3e71ffc52e43261e.cab'

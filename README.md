@@ -53,7 +53,9 @@ flowchart LR
 
 1. Download the zip from the [latest release](../../releases/latest) and extract it (or build
    `xa.xex` yourself, below).
-2. Get the adapter firmware: run `get-firmware.ps1` from the extracted folder.
+2. Get the adapter firmware: double-click **`get-firmware.cmd`** in the extracted folder (it
+   runs `get-firmware.ps1`; Windows doesn't run `.ps1` scripts directly by default). From a
+   prompt, the same thing is:
 
    ```powershell
    powershell -ExecutionPolicy Bypass -File get-firmware.ps1
@@ -104,7 +106,7 @@ dashboard is up, *Wireless adapter: ready*.
 
 **How do I install this plugin?**
 
-Extract the release zip, run `get-firmware.ps1` to fetch the adapter firmware, copy the `Apps`
+Extract the release zip, double-click `get-firmware.cmd` to fetch the adapter firmware, copy the `Apps`
 folder to the console's USB stick or HDD, add `Usb:\Apps\xadapter\xa.xex` (or `Hdd:\...`) to a free `pluginN` line in
 `launch.ini`, plug in the adapter and restart. The console needs kernel 17559 with BadUpdate + XeUnshackle (or anything
 else that loads `launch.ini` plugins). Step by step: [Installation](#-installation).
