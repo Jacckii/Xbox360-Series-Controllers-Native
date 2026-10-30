@@ -35,7 +35,7 @@ GIP messages inside 802.11 QoS-data frames.
 ## USB on the 360
 
 - **Claiming the adapter.** A class-driver entry linked into the kernel's runtime driver list
-  (`0x801A8048`, walked by `UsbdSelectClassDriver`) matches 045e:02fe. No hooks are involved.
+  (`0x801A8048`, walked by `UsbdSelectClassDriver`) matches 045e:02fe and 045e:02e6. No hooks are involved.
   The link is done in a DPC on Usbd's processor.
 - **Transfer API** (hiddriver360 documents the same calls): 740 `UsbdAddDeviceComplete`,
   741 `UsbdCancelAsyncTransfer`, 746 `UsbdOpenDefaultEndpoint`, 747 `UsbdOpenEndpoint`,
