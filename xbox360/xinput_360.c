@@ -121,6 +121,18 @@ static int (*pXamUserBind)(u32 controller_id, u32 context, u8 category, int disc
 			   u8 *user_index);
 static void (*pGuideCallback)(u32 context, u32 zero1, u32 zero2);
 static void (*pXNotifyQueueUI)(u32 type, u32 user, u32 areas, const u16 *text, void *context);
+/* Notify TLS bind (see docs/INVESTIGATION.md): XAM's create gate reads a per-thread
+ * notify context via TlsGetValue, and nothing ever sets that slot for our XAM thread
+ * (the only binder runs inside XAM's init windows and clears the slot again when the
+ * window ends). We bind it ourselves right before each XNotifyQueueUI call: pair[0] =
+ * the notify singleton (its +0xc is the context, +4 a refcount, +8 flags), which
+ * satisfies the gate chain V -> *V -> context. After the first successful create the
+ * TLS-free merge path takes over. */
+static int (*pTlsSetValue)(u32 index, const void *value); /* xboxkrnl ord 341 */
+static u32 xa_notify_pair[2];
+#define XAM_TLS_INDEX_GLOB 0x81A82570u  /* TlsAlloc result of XAM's notify init */
+#define XAM_SINGLETON_GLOB 0x81AA07A8u  /* lazily created notify singleton */
+#define ORD_TlsSetValue 341
 static volatile u32 xam_queue[XAM_QUEUE]; /* (request << 8) | slot */
 static volatile u32 xam_head, xam_tail;
 static volatile u32 xam_stop, xam_running;
@@ -246,6 +258,7 @@ int xa_xinput_init(void)
 	XexGetProcedureAddress(xam, ORD_XamInputGetCapabilitiesEx, &caps);
 	XexGetProcedureAddress(xam, ORD_XamInputSetState, &set_state);
 	XexGetProcedureAddress(xam, ORD_XNotifyQueueUI, (void *)&pXNotifyQueueUI); /* optional */
+	XexGetProcedureAddress(krnl, ORD_TlsSetValue, (void *)&pTlsSetValue); /* notify tls bind */
 	if (!read_state || !caps || !set_state) {
 		xa_log("xinput: read=%08x caps=%08x set=%08x\n", (u32)read_state, (u32)caps,
 		       (u32)set_state);
@@ -315,11 +328,25 @@ void xa_xinput_shutdown(void)
 	xa_log("xinput: hooks removed\n");
 }
 
+/* Notify requests run INLINE on the calling (driver) thread: XAM's dispatcher only
+ * takes its direct path when KeGetCurrentProcessType()==2. The driver thread has
+ * proc=0x02 (verified live via xbdm threadinfo), the XAM-hook thread proc=0x04 -
+ * queueing the notify made every call take the indirect path, whose insert rejects
+ * our message by default (no create, the pending counter stays 0, no toast ever).
+ * The caller sets its payload fields before this runs, so ordering is preserved. */
+static void do_notify(int msg);
+
 /* driver thread: queue a request for the XAM thread; false if the queue is full */
 static bool xam_request(u32 req, int slot)
 {
 	u32 head = xam_head;
 
+	if (req == REQ_NOTIFY) {
+		if (!pXNotifyQueueUI)
+			return false;
+		do_notify(slot);
+		return true;
+	}
 	if (!xam_running || head - xam_tail >= XAM_QUEUE)
 		return false;
 	xam_queue[head % XAM_QUEUE] = req << 8 | (u32)slot;
@@ -386,6 +413,25 @@ void xa_xinput_notify(int msg)
 		xa_log("xinput: notification %d not queued\n", msg);
 }
 
+/* Bind the calling thread to XAM's notify TLS slot (see the block at the function
+ * pointers above). Index and singleton are re-read on every call, which covers the
+ * lazy TlsAlloc/singleton timing (XAM's notify init can run minutes after boot).
+ * Without a singleton the first call is allowed to fail; from the second call on the
+ * bind works and the merge path takes over. */
+static void xa_bind_notify_tls(void)
+{
+	u32 idx, single;
+
+	if (!pTlsSetValue)
+		return;
+	idx = *(volatile u32 *)XAM_TLS_INDEX_GLOB;
+	single = *(volatile u32 *)XAM_SINGLETON_GLOB;
+	if (!single)
+		return;
+	xa_notify_pair[0] = single;
+	pTlsSetValue(idx, xa_notify_pair);
+}
+
 static void do_notify(int msg)
 {
 	u16 *w = notify_wide[msg];
@@ -397,6 +443,7 @@ static void do_notify(int msg)
 	for (i = 0; s[i] && i < (int)ARRAY_SIZE(notify_wide[0]) - 1; i++)
 		w[i] = (u8)s[i];
 	w[i] = 0;
+	xa_bind_notify_tls();
 	pXNotifyQueueUI(NOTIFY_TYPE, NOTIFY_USER_ANY, NOTIFY_AREAS, w, 0);
 	xa_log("xinput: notified \"%s\"\n", s);
 }
