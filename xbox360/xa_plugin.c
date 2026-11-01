@@ -33,9 +33,10 @@
 static const struct {
 	u16 pid;
 	const char *firmware;
+	int no_firmware; /* the notification when it's plugged in and its firmware is missing */
 } adapters[] = {
-	{ 0x02FE, "xone_dongle_02fe.bin" },
-	{ 0x02E6, "xone_dongle_02e6.bin" },
+	{ 0x02FE, "xone_dongle_02fe.bin", XA_NOTIFY_NO_FIRMWARE_02FE },
+	{ 0x02E6, "xone_dongle_02e6.bin", XA_NOTIFY_NO_FIRMWARE_02E6 },
 };
 
 /* the firmware is looked for next to xa.xex first, then in Apps\xadapter on the HDD and
@@ -280,7 +281,9 @@ BODY void XaAddDeviceC(void *node)
 	u->broken = 0;
 	BARRIER();
 	u->node = node;
-	g_xa.state = XA_ADDED;
+	/* with no firmware at all the adapter stays unused: keep that the state xa.py shows */
+	if (g_xa.state != XA_NO_FIRMWARE)
+		g_xa.state = XA_ADDED;
 }
 
 /* closes the endpoints one by one, then the default endpoint, then reports the removal
@@ -949,7 +952,9 @@ BODY u32 XaThreadC(void *context)
 	for (unsigned int ms = 0; !load_all_firmware() && ms < BOOT_RETRY_MS; ms += 1000)
 		wait_ms(1000);
 	if (!load_all_firmware()) {
+		xa_log("xa: no firmware found after %u s, giving up\n", BOOT_RETRY_MS / 1000);
 		g_xa.state = XA_NO_FIRMWARE;
+		xa_xinput_notify(XA_NOTIFY_NO_FIRMWARE);
 		for (;;)
 			wait_ms(1000);
 	}
@@ -984,6 +989,7 @@ BODY u32 XaThreadC(void *context)
 		} else {
 			xa_log("xa: no %s for this adapter\n", adapters[a].firmware);
 			g_xa.state = XA_NO_FIRMWARE;
+			xa_xinput_notify(adapters[a].no_firmware);
 		}
 
 		/* gone, or unusable until it is re-plugged: drop clients, wait for removal
