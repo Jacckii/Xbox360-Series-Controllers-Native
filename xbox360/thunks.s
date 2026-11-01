@@ -46,6 +46,38 @@
     NV64_THUNK XaSetStateHook, XaSetStateHookC
     NV64_THUNK XaXamThread, XaXamThreadC
 
+# xa_kcall9(args, fn): calls kernel function fn with the nine u32 arguments at args.
+# The 360 ABI reads a ninth argument from its 8-byte parameter slot, low word at
+# 0x54(r1); clang puts stack arguments elsewhere (96(r1)), so the kernel would read
+# whatever lies at 0x54. args[0..7] go in r3-r10, args[8] into that slot. Taking only
+# register arguments keeps clang's own stack-argument layout out of it. The frame covers
+# the parameter slots the callee may spill to; LR is kept above them.
+    .text
+    .globl xa_kcall9
+    .p2align 2
+xa_kcall9:
+    mflr 0
+    stwu 1, -112(1)
+    stw 0, 104(1)
+    mtctr 4
+    li 0, 0
+    stw 0, 0x50(1)
+    lwz 0, 32(3)
+    stw 0, 0x54(1)
+    lwz 4, 4(3)
+    lwz 5, 8(3)
+    lwz 6, 12(3)
+    lwz 7, 16(3)
+    lwz 8, 20(3)
+    lwz 9, 24(3)
+    lwz 10, 28(3)
+    lwz 3, 0(3)
+    bctrl
+    lwz 0, 104(1)
+    mtlr 0
+    addi 1, 1, 112
+    blr
+
 # detour trampolines (detour.c): 8 x 30 words, written at run time. In .text because
 # code in data pages doesn't run on the 360.
     .text
