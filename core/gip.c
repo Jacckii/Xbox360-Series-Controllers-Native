@@ -36,10 +36,31 @@ enum gip_command {
 	GIP_CMD_POWER = 0x05,
 	GIP_CMD_AUTHENTICATE = 0x06,
 	GIP_CMD_VIRTUAL_KEY = 0x07,
+	GIP_CMD_AUDIO_CONTROL = 0x08,
 	GIP_CMD_RUMBLE = 0x09,
 	GIP_CMD_LED = 0x0a,
 	GIP_CMD_INPUT = 0x20,
+	GIP_CMD_AUDIO_SAMPLES = 0x60,
 };
+
+enum gip_power_mode {
+	GIP_PWR_ON = 0x00,
+	GIP_PWR_SLEEP = 0x01,
+};
+
+enum gip_audio_control {
+	GIP_AUD_CTRL_FORMAT = 0x02,
+	GIP_AUD_CTRL_VOLUME = 0x03,
+};
+
+/* headset start: power-on is repeated until the headset reports its volume or sends
+ * samples (as xone); the handshake starts a little after the first one */
+#define GIP_HS_START_DELAY_MS 500
+#define GIP_HS_MAX_RETRIES 6
+#define GIP_HS_AUTH_DELAY_MS 250
+
+/* GIP audio formats 0x01-0x10: 8, 12, 16, 20, 24, 32, 40, 48 kHz, odd = mono */
+static const u16 gip_audio_rate_khz[8] = { 8, 12, 16, 20, 24, 32, 40, 48 };
 
 enum gip_option {
 	GIP_OPT_ACKNOWLEDGE = BIT(4),
@@ -460,7 +481,8 @@ static int auth_complete(struct gip_client *gc)
 
 	gc->auth.done = true;
 	xa_log("gip: client %d authenticated\n", gc->xc->wcid);
-	if (gc->ops && gc->ops->ready)
+	/* the ops present gamepads; a headset has no pad to bind */
+	if (gc->gamepad && gc->ops && gc->ops->ready)
 		gc->ops->ready(gc);
 	return 0;
 }
@@ -558,6 +580,90 @@ static int start_gamepad(struct gip_client *gc)
 	return err;
 }
 
+/* for the log: a format's rate in kHz (0 = unknown) and its channels */
+static u16 format_khz(u8 format)
+{
+	return format >= 1 && format <= 16 ? gip_audio_rate_khz[(format - 1) / 2] : 0;
+}
+
+static const char *format_channels(u8 format)
+{
+	return (format & 1) ? "mono" : "stereo";
+}
+
+static int suggest_audio_format(struct gip_client *gc, u8 in, u8 out)
+{
+	const u8 pkt[3] = { GIP_AUD_CTRL_FORMAT, in, out };
+
+	gc->audio_in = in;
+	gc->audio_out = out;
+	return send_cmd(gc, GIP_CMD_AUDIO_CONTROL, GIP_OPT_INTERNAL, pkt, sizeof(pkt));
+}
+
+/* as xone's headset driver: idle, then suggest the first format pair it offered; the
+ * power-on and the handshake follow once it accepts one */
+static int start_headset(struct gip_client *gc)
+{
+	static const u8 power_sleep[1] = { GIP_PWR_SLEEP };
+	int err;
+
+	if (!gc->audio_format_count) {
+		xa_log("gip: client %d is a headset without audio formats\n", gc->xc->wcid);
+		return 0;
+	}
+	err = send_cmd(gc, GIP_CMD_POWER, GIP_OPT_INTERNAL, power_sleep, sizeof(power_sleep));
+	if (!err)
+		err = suggest_audio_format(gc, gc->audio_formats[0], gc->audio_formats[1]);
+	return err;
+}
+
+static int handle_audio_control(struct gip_client *gc, const u8 *data, u32 len)
+{
+	if (!len || !gc->headset)
+		return -XA_EINVAL;
+
+	switch (data[0]) {
+	case GIP_AUD_CTRL_FORMAT:
+		if (len != 3 || gc->audio_ready)
+			return -XA_EINVAL;
+		if (data[1] != gc->audio_in || data[2] != gc->audio_out) {
+			xa_log("gip: client %d wants audio %02x/%02x instead\n", gc->xc->wcid,
+			       data[1], data[2]);
+			return suggest_audio_format(gc, data[1], data[2]);
+		}
+		xa_log("gip: client %d audio accepted: in %u kHz %s, out %u kHz %s\n",
+		       gc->xc->wcid, format_khz(data[1]), format_channels(data[1]),
+		       format_khz(data[2]), format_channels(data[2]));
+		gc->audio_ready = true;
+		gc->power_tries = 0;
+		gc->power_last = 0; /* gip_poll sends the first power-on right away */
+		gc->auth_due = xa_now_ms() + GIP_HS_AUTH_DELAY_MS;
+		return 0;
+	case GIP_AUD_CTRL_VOLUME:
+		if (len < 5)
+			return -XA_EINVAL;
+		xa_log("gip: client %d volume: mute %u, out %u, chat %u, in %u\n", gc->xc->wcid,
+		       data[1], data[2], data[3], data[4]);
+		gc->audio_started = true;
+		return 0;
+	}
+	xa_log("gip: client %d audio control %02x (%u bytes)\n", gc->xc->wcid, data[0], len);
+	return 0;
+}
+
+static int handle_audio_samples(struct gip_client *gc, const u8 *data, u32 len)
+{
+	(void)data;
+	if (!gc->headset)
+		return -XA_EINVAL;
+	/* the first one, then every 1000th: enough to see the microphone stream runs */
+	if (gc->audio_rx++ % 1000 == 0)
+		xa_log("gip: client %d audio samples: %u bytes (%u packets)\n", gc->xc->wcid, len,
+		       gc->audio_rx);
+	gc->audio_started = true;
+	return 0;
+}
+
 static int handle_announce(struct gip_client *gc, const u8 *data, u32 len)
 {
 	if (len != 28)
@@ -587,6 +693,27 @@ static int handle_identify(struct gip_client *gc, const u8 *data, u32 len)
 		return 0;
 
 	blen = len - 16;
+
+	/* audio formats: a count, then (in, out) pairs; 0 = none */
+	off = get_le16(data + 20);
+	if (off && off + 1 <= blen) {
+		u8 n = base[off];
+
+		if (off + 1 + 2 * n <= blen) {
+			if (n > GIP_AUDIO_FORMATS_MAX)
+				n = GIP_AUDIO_FORMATS_MAX;
+			memcpy(gc->audio_formats, base + off + 1, 2 * n);
+			gc->audio_format_count = n;
+			for (u8 i = 0; i < n; i++)
+				xa_log("gip: client %d audio format %u: in %02x (%u kHz %s), "
+				       "out %02x (%u kHz %s)\n", gc->xc->wcid, i,
+				       base[off + 1 + 2 * i], format_khz(base[off + 1 + 2 * i]),
+				       format_channels(base[off + 1 + 2 * i]),
+				       base[off + 2 + 2 * i], format_khz(base[off + 2 + 2 * i]),
+				       format_channels(base[off + 2 + 2 * i]));
+		}
+	}
+
 	off = get_le16(data + 26); /* classes */
 	if (off + 1 > blen)
 		return -XA_EINVAL;
@@ -605,11 +732,15 @@ static int handle_identify(struct gip_client *gc, const u8 *data, u32 len)
 		xa_log("gip: client %d class %.*s\n", gc->xc->wcid, str_len, (const char *)base + off);
 		if (str_len == 26 && !memcmp(base + off, "Windows.Xbox.Input.Gamepad", 26))
 			gc->gamepad = true;
+		if (str_len == 26 && !memcmp(base + off, "Windows.Xbox.Input.Headset", 26))
+			gc->headset = true;
 		off += str_len;
 	}
 
 	gc->identified = true;
-	return gc->gamepad ? start_gamepad(gc) : 0;
+	if (gc->gamepad)
+		return start_gamepad(gc);
+	return gc->headset ? start_headset(gc) : 0;
 }
 
 /* forget the session; the controller announces itself again when it comes back */
@@ -617,8 +748,12 @@ static void reset_session(struct gip_client *gc)
 {
 	free_chunk(&gc->in);
 	free_chunk(&gc->out);
-	gc->identified = gc->gamepad = false;
+	gc->identified = gc->gamepad = gc->headset = false;
 	gc->vendor = gc->product = gc->version = 0;
+	gc->audio_format_count = gc->audio_in = gc->audio_out = 0;
+	gc->audio_ready = gc->audio_started = false;
+	gc->power_tries = 0;
+	gc->audio_rx = 0;
 	memset(&gc->auth, 0, sizeof(gc->auth));
 	memset(&gc->state, 0, sizeof(gc->state));
 	memset(gc->rumble, 0, sizeof(gc->rumble));
@@ -653,11 +788,39 @@ void gip_set_rumble(struct gip_client *gc, u8 left, u8 right, u8 trigger_left,
 	gc->rumble[3] = MIN(trigger_right, GIP_GP_RUMBLE_MAX);
 }
 
+/* the headset's start sequence: power-on until it answers, the handshake once */
+static void poll_headset(struct gip_client *gc, u64 now)
+{
+	static const u8 power_on[1] = { GIP_PWR_ON };
+
+	if (!gc->audio_ready)
+		return;
+	if (gc->auth_due && now >= gc->auth_due) {
+		gc->auth_due = 0;
+		sha256_init(&gc->auth.transcript);
+		auth_send_hello(gc, false);
+	}
+	if (gc->audio_started || gc->power_tries > GIP_HS_MAX_RETRIES ||
+	    now < gc->power_last + GIP_HS_START_DELAY_MS)
+		return;
+	if (gc->power_tries++ == GIP_HS_MAX_RETRIES) {
+		xa_log("gip: client %d sent no volume or samples after %u power-ons\n",
+		       gc->xc->wcid, GIP_HS_MAX_RETRIES);
+		return;
+	}
+	send_cmd(gc, GIP_CMD_POWER, GIP_OPT_INTERNAL, power_on, sizeof(power_on));
+	gc->power_last = now;
+}
+
 void gip_poll(struct gip_client *gc)
 {
 	u64 now = xa_now_ms();
 	u8 pkt[9];
 
+	if (gc->headset) {
+		poll_headset(gc, now);
+		return;
+	}
 	if (!gc->auth.done || !memcmp(gc->rumble, gc->rumble_sent, sizeof(gc->rumble)))
 		return;
 
@@ -727,12 +890,18 @@ static int dispatch(struct gip_client *gc, const struct gip_header *hdr, const u
 			return auth_rx(gc, data, len);
 		case GIP_CMD_VIRTUAL_KEY:
 			return handle_virtual_key(gc, data, len);
+		case GIP_CMD_AUDIO_CONTROL:
+			return handle_audio_control(gc, data, len);
+		case GIP_CMD_AUDIO_SAMPLES:
+			return handle_audio_samples(gc, data, len);
 		}
 		return 0;
 	}
 
 	if (hdr->command == GIP_CMD_INPUT)
 		return handle_input(gc, data, len);
+	if (hdr->command == GIP_CMD_AUDIO_SAMPLES)
+		return handle_audio_samples(gc, data, len);
 	return 0;
 }
 
