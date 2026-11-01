@@ -38,7 +38,10 @@ void xa_xinput_update(int slot, const struct gip_gamepad_state *s);
 bool xa_xinput_take_rumble(int slot, u8 *left, u8 *right);
 
 /* on-screen notifications, shown by the XAM thread; "starting" is shown when it starts */
-enum { XA_NOTIFY_STARTING, XA_NOTIFY_READY, XA_NOTIFY_COUNT };
+enum {
+	XA_NOTIFY_STARTING, XA_NOTIFY_READY, XA_NOTIFY_NO_FIRMWARE, XA_NOTIFY_NO_FIRMWARE_02FE,
+	XA_NOTIFY_NO_FIRMWARE_02E6, XA_NOTIFY_COUNT
+};
 void xa_xinput_notify(int msg);
 
 /* log the hook counters when they change (throttled); called from the driver thread */
