@@ -3,6 +3,7 @@
 """Test helper for the xa plugin over xbdm (port 730). Run next to out/ (on the toolchain host).
 
   xa.py upload [FIRMWARE]   copy out/xa.xex, out/xa_loader.xex and the firmware to Usb0:\\Apps\\xadapter
+                            (a file named xone_dongle_<pid>.bin keeps its name, others become 02fe)
   xa.py load                start the loader (it loads xa.xex as a system DLL)
   xa.py boot on|off         load xa.xex at every boot: a pluginN line in Usb0:\\launch.ini
                             (XeUnshackle's launch.xex); the old file is backed up first
@@ -273,8 +274,12 @@ def main():
     if step == "upload":
         fw = sys.argv[2] if len(sys.argv) > 2 else "/lib/firmware/xone_dongle_02fe.bin"
         name = built_name() + ".xex"
+        # keep the adapter's name (xone_dongle_02e6.bin is the original adapter's firmware)
+        fw_name = os.path.basename(fw)
+        if not (fw_name.startswith("xone_dongle_") and fw_name.endswith(".bin")):
+            fw_name = "xone_dongle_02fe.bin"
         files = [(name, os.path.join(OUT, name)), ("xa_loader.xex", os.path.join(OUT, "xa_loader.xex")),
-                 ("xone_dongle_02fe.bin", fw)]
+                 (fw_name, fw)]
         for name, path in files:
             data = open(path, "rb").read()
             print(name, len(data), Xbdm().sendfile(FOLDER + B + name, data))

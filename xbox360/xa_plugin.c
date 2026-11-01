@@ -24,14 +24,23 @@
 #define BARRIER() __asm__ __volatile__("lwsync" ::: "memory")
 
 #define ADAPTER_VID 0x045E
-#define ADAPTER_PID 0x02FE
 #define EP_IN_CMD (XA_MT_EP_IN_CMD | 0x80)
 #define EP_IN_WLAN (XA_MT_EP_IN_WLAN | 0x80)
 #define EP_MAX_PACKET 512
 
+/* the slim (2017) and the original (2015) Xbox Wireless Adapter for Windows: the same driver,
+ * each with its own firmware, as in xone */
+static const struct {
+	u16 pid;
+	const char *firmware;
+	int no_firmware; /* the notification when it's plugged in and its firmware is missing */
+} adapters[] = {
+	{ 0x02FE, "xone_dongle_02fe.bin", XA_NOTIFY_NO_FIRMWARE_02FE },
+	{ 0x02E6, "xone_dongle_02e6.bin", XA_NOTIFY_NO_FIRMWARE_02E6 },
+};
+
 /* the firmware is looked for next to xa.xex first, then in Apps\xadapter on the HDD and
  * each USB drive */
-#define FIRMWARE_NAME "xone_dongle_02fe.bin"
 #define FIRMWARE_DIR "\\Apps\\xadapter\\"
 #define FIRMWARE_PATH_MAX 260
 #define FIRMWARE_MAX 0x20000
@@ -108,6 +117,8 @@ void XaAddDevice(void *node);
 void XaRemoveDevice(void *node);
 long XaCloseDone(struct usbd_transfer *t, long status);
 u32 XaThread(void *context);
+/* a kernel call with nine arguments, the ninth placed where the 360 ABI reads it */
+long xa_kcall9(const u32 args[9], void *fn);
 
 #define BODY __attribute__((used, noinline))
 
@@ -194,6 +205,11 @@ static struct xa_xfer g_close[4]; /* one per close step */
 static u32 g_close_step;
 static void *g_removing; /* the node whose removal is in progress */
 static struct xa_dongle g_dongle;
+static int g_adapter; /* index in adapters[] of the one being taken; set on Usbd's DPC */
+static struct {
+	u8 *data;
+	u32 len;
+} g_fw[ARRAY_SIZE(adapters)];
 
 /*
  * IN buffers: each must fit one EHCI transfer descriptor (XA_USB_IN_MAX from a page
@@ -211,14 +227,23 @@ static u8 in_wlan_buf[XA_XFER_IN_COUNT][IN_WLAN_SIZE] __attribute__((aligned(0x1
 BODY u32 XaMatchC(const u8 *ifdesc, const u8 *devdesc, struct usbd_class_driver *self)
 {
 	u16 vid = devdesc[8] | devdesc[9] << 8, pid = devdesc[10] | devdesc[11] << 8;
+	unsigned int i;
 
 	(void)ifdesc;
 	(void)self;
 	g_xa.match_calls++;
-	if (vid != ADAPTER_VID || pid != ADAPTER_PID)
+	if (vid != ADAPTER_VID)
 		return 0;
-	xa_log("usb: adapter offered (%s)\n", g_usb.node ? "busy, declined" : "taking it");
-	return !g_usb.node;
+	for (i = 0; i < ARRAY_SIZE(adapters) && adapters[i].pid != pid; i++)
+		;
+	if (i == ARRAY_SIZE(adapters))
+		return 0;
+	xa_log("usb: adapter %04x offered (%s)\n", pid, g_usb.node ? "busy, declined" : "taking it");
+	if (g_usb.node)
+		return 0;
+	g_adapter = (int)i;
+	BARRIER(); /* before AddDevice publishes the node the thread waits for */
+	return 1;
 }
 
 /* open an endpoint into the first block of a group and share its handle with the rest */
@@ -258,7 +283,9 @@ BODY void XaAddDeviceC(void *node)
 	u->broken = 0;
 	BARRIER();
 	u->node = node;
-	g_xa.state = XA_ADDED;
+	/* with no firmware at all the adapter stays unused: keep that the state xa.py shows */
+	if (g_xa.state != XA_NO_FIRMWARE)
+		g_xa.state = XA_ADDED;
 }
 
 /* closes the endpoints one by one, then the default endpoint, then reports the removal
@@ -471,8 +498,12 @@ static u8 *load_firmware_at(const char *path, u32 *len, NTSTATUS *status)
 	u32 total = 0;
 
 	/* GENERIC_READ | SYNCHRONIZE, FILE_SHARE_READ, FILE_OPEN,
-	 * FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE */
-	st = NtCreateFile(&file, 0x80100000, &attrs, &io, 0, 0x80, 1, 1, 0x60);
+	 * FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE. The create options are the
+	 * ninth argument: called directly, the kernel read them from a stack slot clang code
+	 * leaves stale, and FILE_DELETE_ON_CLOSE in there deleted the firmware once read. */
+	const u32 args[9] = { (u32)&file, 0x80100000, (u32)&attrs, (u32)&io, 0, 0x80, 1, 1, 0x60 };
+
+	st = xa_kcall9(args, (void *)NtCreateFile);
 	*status = st;
 	if ((s32)st < 0)
 		return NULL;
@@ -530,18 +561,18 @@ static int module_dir(char *out)
 	return slash + 1;
 }
 
-/* the firmware from the first place that has it; NULL if none does. The places tried are
- * logged the first time only, as the boot retries call this every second. */
-static u8 *load_firmware(u32 *len)
+/* the firmware named name from the first place that has it; NULL if none does. The places
+ * tried are logged the first time only, as the boot retries call this every second. */
+static u8 *load_firmware(const char *name, u32 *len, bool *logged_once)
 {
-	static bool logged;
+	bool logged = *logged_once;
 	char path[FIRMWARE_PATH_MAX];
 	NTSTATUS st;
 	u8 *fw;
 	int n;
 
 	n = module_dir(path);
-	if (n > 0 && path_append(path, n, FIRMWARE_NAME) > 0) {
+	if (n > 0 && path_append(path, n, name) > 0) {
 		if ((fw = load_firmware_at(path, len, &st)))
 			return fw;
 		if (!logged)
@@ -552,7 +583,7 @@ static u8 *load_firmware(u32 *len)
 	for (unsigned int i = 0; i < ARRAY_SIZE(firmware_roots); i++) {
 		n = path_append(path, 0, firmware_roots[i]);
 		if (n < 0 || (n = path_append(path, n, FIRMWARE_DIR)) < 0 ||
-		    path_append(path, n, FIRMWARE_NAME) < 0)
+		    path_append(path, n, name) < 0)
 			continue;
 		if ((fw = load_firmware_at(path, len, &st)))
 			return fw;
@@ -560,8 +591,29 @@ static u8 *load_firmware(u32 *len)
 		if (!logged)
 			xa_log("xa: no firmware at %s (%08x)\n", path, (u32)st);
 	}
-	logged = true;
+	*logged_once = true;
 	return NULL;
+}
+
+/* loads every adapter's firmware not loaded yet; the number of adapters that have one */
+static int load_all_firmware(void)
+{
+	static bool logged[ARRAY_SIZE(adapters)];
+	int have = 0;
+
+	for (unsigned int i = 0; i < ARRAY_SIZE(adapters); i++) {
+		if (!g_fw[i].data) {
+			u32 len = 0;
+			u8 *fw = load_firmware(adapters[i].firmware, &len, &logged[i]);
+
+			if (fw && len >= 1024) {
+				g_fw[i].data = fw;
+				g_fw[i].len = len;
+			}
+		}
+		have += g_fw[i].data != NULL;
+	}
+	return have;
 }
 
 /* xbdm commands, checked wherever the thread waits */
@@ -897,20 +949,18 @@ static void raise_priority(void)
 
 BODY u32 XaThreadC(void *context)
 {
-	u32 fw_len = 0;
-	u8 *fw;
-
 	(void)context;
 	xa_log("xa: driver thread started\n");
 	raise_priority();
 	/* as a boot plugin we can be up before XAM or the drives: retry those */
 	for (unsigned int ms = 0; xa_xinput_init() == -XA_ENODEV && ms < BOOT_RETRY_MS; ms += 1000)
 		wait_ms(1000);
-	for (unsigned int ms = 0; !(fw = load_firmware(&fw_len)) && ms < BOOT_RETRY_MS; ms += 1000)
+	for (unsigned int ms = 0; !load_all_firmware() && ms < BOOT_RETRY_MS; ms += 1000)
 		wait_ms(1000);
-	g_xa.firmware_size = fw_len;
-	if (!fw || fw_len < 1024) {
+	if (!load_all_firmware()) {
+		xa_log("xa: no firmware found after %u s, giving up\n", BOOT_RETRY_MS / 1000);
 		g_xa.state = XA_NO_FIRMWARE;
+		xa_xinput_notify(XA_NOTIFY_NO_FIRMWARE);
 		for (;;)
 			wait_ms(1000);
 	}
@@ -927,6 +977,7 @@ BODY u32 XaThreadC(void *context)
 
 	for (;;) {
 		void *node;
+		int a;
 
 		while (!g_usb.node || g_usb.gone) {
 			if (g_release)
@@ -934,13 +985,23 @@ BODY u32 XaThreadC(void *context)
 			wait_ms(10);
 		}
 		node = g_usb.node;
-		xa_log("xa: adapter %08x\n", (u32)node);
-		run_adapter(fw, fw_len);
+		a = g_adapter;
+		xa_log("xa: adapter %08x (%04x)\n", (u32)node, adapters[a].pid);
+		if (!g_fw[a].data)
+			load_all_firmware(); /* it may have been copied since boot */
+		g_xa.firmware_size = g_fw[a].len;
+		if (g_fw[a].data) {
+			run_adapter(g_fw[a].data, g_fw[a].len);
+		} else {
+			xa_log("xa: no %s for this adapter\n", adapters[a].firmware);
+			g_xa.state = XA_NO_FIRMWARE;
+			xa_xinput_notify(adapters[a].no_firmware);
+		}
 
 		/* gone, or unusable until it is re-plugged: drop clients, wait for removal
 		 * (not after the firmware upload: the chip is resetting itself). Compare
 		 * nodes: after a re-enumeration the new device may already be added. */
-		if (g_xa.state != XA_REENUMERATING)
+		if (g_xa.state != XA_REENUMERATING && g_xa.state != XA_NO_FIRMWARE)
 			xa_dongle_stop(&g_dongle);
 		if (g_release)
 			do_release();

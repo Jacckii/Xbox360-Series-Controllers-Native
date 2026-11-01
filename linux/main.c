@@ -3,7 +3,8 @@
  * xadapter: drives the Xbox Wireless Adapter from userspace with libusb.
  * The adapter must not be bound to the xone kernel driver (unload xone_dongle).
  *
- *   xadapter /lib/firmware/xone_dongle_02fe.bin
+ *   xadapter /lib/firmware/xone_dongle_02fe.bin   (slim adapter, 045e:02fe)
+ *   xadapter /lib/firmware/xone_dongle_02e6.bin   (original adapter, 045e:02e6)
  */
 #include <errno.h>
 #include <signal.h>
@@ -14,7 +15,7 @@
 #include "platform_libusb.h"
 
 #define VID 0x045e
-#define PID 0x02fe
+static const u16 pids[] = { 0x02fe, 0x02e6 };
 #define IN_TRANSFERS 4
 
 /* received buffers, queued by libusb callbacks and processed by the main loop */
@@ -89,7 +90,8 @@ static int open_adapter(int wait_ms)
 	u64 until = xa_now_ms() + wait_ms;
 
 	do {
-		usb.handle = libusb_open_device_with_vid_pid(NULL, VID, PID);
+		for (unsigned int i = 0; !usb.handle && i < sizeof(pids) / sizeof(pids[0]); i++)
+			usb.handle = libusb_open_device_with_vid_pid(NULL, VID, pids[i]);
 		if (usb.handle) {
 			libusb_set_auto_detach_kernel_driver(usb.handle, 1);
 			if (!libusb_claim_interface(usb.handle, 0))

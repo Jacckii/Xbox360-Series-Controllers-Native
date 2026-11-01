@@ -35,7 +35,7 @@ GIP messages inside 802.11 QoS-data frames.
 ## USB on the 360
 
 - **Claiming the adapter.** A class-driver entry linked into the kernel's runtime driver list
-  (`0x801A8048`, walked by `UsbdSelectClassDriver`) matches 045e:02fe. No hooks are involved.
+  (`0x801A8048`, walked by `UsbdSelectClassDriver`) matches 045e:02fe and 045e:02e6. No hooks are involved.
   The link is done in a DPC on Usbd's processor.
 - **Transfer API** (hiddriver360 documents the same calls): 740 `UsbdAddDeviceComplete`,
   741 `UsbdCancelAsyncTransfer`, 746 `UsbdOpenDefaultEndpoint`, 747 `UsbdOpenEndpoint`,
@@ -113,12 +113,16 @@ short bursts between 2 ms sleeps, and at most 64 received frames are handled per
 ## Toolchain constraints
 
 OpenXeChain's clang targets the 32-bit PowerPC SVR4 ABI, while the kernel is built for the
-360's 64-bit-register ABI. Three rules follow:
+360's 64-bit-register ABI. Four rules follow:
 
 - **Every function the kernel calls** (DllMain, DPCs, thread starts, transfer completions,
   driver callbacks, hooks) goes through a thunk (`thunks.s`) that saves r14–r31 as 64-bit values.
 - **No kernel function that takes or returns a 64-bit value by value** is called directly: such
   a value would be passed in a register pair instead of one register.
+- **No kernel function with more than eight arguments** is called directly: clang puts the
+  ninth on the stack at `96(r1)`, the kernel reads it at `0x54(r1)`. `xa_kcall9` (`thunks.s`)
+  takes the arguments as an array and places the ninth there. `NtCreateFile` called directly got stale stack data as its create options,
+  and with `FILE_DELETE_ON_CLOSE` among them the firmware file was deleted once read.
 - **No floating point.** DPCs have no FP context, and the ABI's variadic prologue saves f1–f8
   unconditionally, so a hard-float `printf`-style function faults in a DPC. The plugin builds
   with `-msoft-float`.

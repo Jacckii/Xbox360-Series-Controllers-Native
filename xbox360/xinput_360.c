@@ -49,6 +49,9 @@ enum { REQ_BIND = 1, REQ_UNBIND, REQ_GUIDE, REQ_NOTIFY };
 static const char *const notify_text[XA_NOTIFY_COUNT] = {
 	[XA_NOTIFY_STARTING] = "Wireless adapter: starting",
 	[XA_NOTIFY_READY] = "Wireless adapter: ready",
+	[XA_NOTIFY_NO_FIRMWARE] = "Wireless adapter: firmware missing",
+	[XA_NOTIFY_NO_FIRMWARE_02FE] = "Wireless adapter: 02fe firmware missing",
+	[XA_NOTIFY_NO_FIRMWARE_02E6] = "Wireless adapter: 02e6 firmware missing",
 };
 static u16 notify_wide[XA_NOTIFY_COUNT][40]; /* kept alive: the queue may hold the pointer */
 

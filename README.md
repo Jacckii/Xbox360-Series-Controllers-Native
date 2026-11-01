@@ -20,7 +20,7 @@ games. No additional hardware.
 
 ```mermaid
 flowchart LR
-    C["Xbox Series X|S controllers<br/>(up to 4)"] -- "Xbox Wireless" --> A["Xbox Wireless Adapter<br/>(045e:02fe)"]
+    C["Xbox Series X|S controllers<br/>(up to 4)"] -- "Xbox Wireless" --> A["Xbox Wireless Adapter<br/>(045e:02fe or 02e6)"]
     A -- "USB" --> X360
     subgraph X360["Xbox 360 (kernel 17559)"]
         P["xa.xex: firmware, radio, pairing,<br/>security handshake, GIP"] --> I["XInput controllers"]
@@ -41,11 +41,12 @@ flowchart LR
 
 - An Xbox 360 on kernel **17559** that runs unsigned code and loads `launch.ini` plugins
   (for example [BadUpdate](https://github.com/grimdoomer/Xbox360BadUpdate) + XeUnshackle).
-- Microsoft **Xbox Wireless Adapter for Windows**, USB ID `045e:02fe`.
+- Microsoft **Xbox Wireless Adapter for Windows**: the slim 2017 model (USB ID `045e:02fe`) or
+  the original 2015 model (`045e:02e6`).
 - The adapter's **firmware**, from Microsoft's Windows driver. It isn't redistributed here:
-  [`get-firmware.ps1`](get-firmware.ps1) downloads it from Microsoft (see *Installation*). It's
-  the same file the Linux [xone](https://github.com/dlundqvist/xone) driver installs as
-  `/lib/firmware/xone_dongle_02fe.bin`.
+  [`get-firmware.ps1`](get-firmware.ps1) downloads it from Microsoft (see *Installation*). They're
+  the same files the Linux [xone](https://github.com/dlundqvist/xone) driver installs as
+  `/lib/firmware/xone_dongle_02fe.bin` and `xone_dongle_02e6.bin`.
 - To build: [OpenXeChain](https://github.com/OpenXeChain) with the SynthXEX system-DLL patch
   (see *Building* below).
 
@@ -61,14 +62,16 @@ flowchart LR
    powershell -ExecutionPolicy Bypass -File get-firmware.ps1
    ```
 
-   It downloads Microsoft's driver package from Windows Update, checks the firmware's SHA-256
-   and saves it as `Apps\xadapter\xone_dongle_02fe.bin`. On Linux, copy xone's
-   `/lib/firmware/xone_dongle_02fe.bin` into `Apps\xadapter\` instead.
+   It downloads Microsoft's driver packages from Windows Update, checks the firmware's SHA-256
+   and saves `Apps\xadapter\xone_dongle_02fe.bin` (slim adapter) and `xone_dongle_02e6.bin`
+   (original adapter); the plugin picks the one for the adapter you plug in. On Linux, copy
+   xone's `/lib/firmware/xone_dongle_*.bin` into `Apps\xadapter\` instead.
 3. Copy the `Apps` folder to the root of the console's USB stick or HDD, so it has:
 
    ```
    Usb:\Apps\xadapter\xa.xex
    Usb:\Apps\xadapter\xone_dongle_02fe.bin
+   Usb:\Apps\xadapter\xone_dongle_02e6.bin
    ```
 
    (or the same under `Hdd:\`). The firmware just has to sit next to `xa.xex`; the plugin
@@ -124,7 +127,8 @@ pair with it just as they do on a PC.
 
 **Do I need any additional hardware?**
 
-No, only Microsoft's Xbox Wireless Adapter for Windows (`045e:02fe`).
+No, only Microsoft's Xbox Wireless Adapter for Windows (`045e:02fe`, or the original
+`045e:02e6`).
 No Raspberry Pi, no converter, no cables to the controllers.
 
 **Can I use Series controllers and Xbox 360 controllers together?**
