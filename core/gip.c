@@ -60,6 +60,22 @@ enum gip_audio_control {
 #define GIP_HS_START_DELAY_MS 500
 #define GIP_HS_MAX_RETRIES 6
 
+/* sample packets carry 8 ms of 16-bit little-endian PCM (xone GIP_AUDIO_INTERVAL); over
+ * the adapter, one packet per interval */
+#define GIP_AUDIO_INTERVAL_MS 8
+#define GIP_AUDIO_MAX_BYTES (48 * 2 * 2 * GIP_AUDIO_INTERVAL_MS) /* 48 kHz stereo */
+
+/* stage 2 test: once the headset runs, a 1 kHz tone this long */
+#define GIP_HS_TONE_MS 3000
+
+/* one period of a 1 kHz sine at 48 kHz, about -20 dBFS */
+static const s16 tone_1khz[48] = {
+	0, 392, 776, 1148, 1500, 1826, 2121, 2380, 2598, 2772, 2898, 2974,
+	3000, 2974, 2898, 2772, 2598, 2380, 2121, 1826, 1500, 1148, 776, 392,
+	0, -392, -776, -1148, -1500, -1826, -2121, -2380, -2598, -2772, -2898, -2974,
+	-3000, -2974, -2898, -2772, -2598, -2380, -2121, -1826, -1500, -1148, -776, -392,
+};
+
 /* GIP audio formats 0x01-0x10: 8, 12, 16, 20, 24, 32, 40, 48 kHz, odd = mono */
 static const u16 gip_audio_rate_khz[8] = { 8, 12, 16, 20, 24, 32, 40, 48 };
 
@@ -754,6 +770,10 @@ static void reset_session(struct gip_client *gc)
 	gc->audio_ready = gc->audio_started = false;
 	gc->power_tries = 0;
 	gc->audio_rx = 0;
+	gc->audio_seq = 0;
+	gc->tone_done = false;
+	gc->tone_pos = gc->tone_sent = gc->tone_failed = 0;
+	gc->tone_next = gc->tone_end = 0;
 	memset(&gc->auth, 0, sizeof(gc->auth));
 	memset(&gc->state, 0, sizeof(gc->state));
 	memset(gc->rumble, 0, sizeof(gc->rumble));
@@ -788,14 +808,85 @@ void gip_set_rumble(struct gip_client *gc, u8 left, u8 right, u8 trigger_left,
 	gc->rumble[3] = MIN(trigger_right, GIP_GP_RUMBLE_MAX);
 }
 
-/* the headset's start sequence: power-on until it answers */
+static int send_audio(struct gip_client *gc, const u8 *samples, u32 len)
+{
+	u8 buf[8 + GIP_AUDIO_MAX_BYTES];
+	struct gip_header hdr = {
+		.command = GIP_CMD_AUDIO_SAMPLES,
+		.options = GIP_OPT_INTERNAL,
+		.packet_length = len,
+	};
+	int hdr_len = header_length(&hdr);
+
+	if (len > GIP_AUDIO_MAX_BYTES)
+		return -XA_ENOSPC;
+	/* sequence numbers are never zero */
+	if (!++gc->audio_seq)
+		++gc->audio_seq;
+	hdr.sequence = gc->audio_seq;
+	encode_header(&hdr, buf);
+	memcpy(buf + hdr_len, samples, len);
+	return xa_dongle_send(gc->xc, buf, hdr_len + len, XA_DONGLE_QUEUE_AUDIO);
+}
+
+/* the next 8 ms of the tone in the agreed output format */
+static int send_tone(struct gip_client *gc)
+{
+	u8 pcm[GIP_AUDIO_MAX_BYTES], *p = pcm;
+	u32 khz = format_khz(gc->audio_out), channels = (gc->audio_out & 1) ? 1 : 2;
+
+	for (u32 i = 0; i < khz * GIP_AUDIO_INTERVAL_MS; i++, gc->tone_pos++) {
+		u16 v = (u16)tone_1khz[gc->tone_pos * 48 / khz % 48];
+
+		for (u32 c = 0; c < channels; c++) {
+			*p++ = (u8)v;
+			*p++ = (u8)(v >> 8);
+		}
+	}
+	return send_audio(gc, pcm, (u32)(p - pcm));
+}
+
+static void play_tone(struct gip_client *gc, u64 now)
+{
+	if (gc->tone_done || !format_khz(gc->audio_out))
+		return;
+	if (!gc->tone_end) {
+		gc->tone_end = now + GIP_HS_TONE_MS;
+		gc->tone_next = now;
+		xa_log("gip: client %d test tone: 1 kHz for %u ms\n", gc->xc->wcid, GIP_HS_TONE_MS);
+	}
+	if (now >= gc->tone_end) {
+		gc->tone_done = true;
+		xa_log("gip: client %d test tone done: %u packets, %u failed\n", gc->xc->wcid,
+		       gc->tone_sent, gc->tone_failed);
+		return;
+	}
+	/* fell far behind: carry on from now instead of bursting */
+	if (gc->tone_next + 4 * GIP_AUDIO_INTERVAL_MS < now)
+		gc->tone_next = now;
+	/* the poll loop can be slower than 8 ms: send every packet that is due */
+	while (now >= gc->tone_next) {
+		int err = send_tone(gc);
+
+		if (err && !gc->tone_failed++)
+			xa_log("gip: client %d audio send failed: %d\n", gc->xc->wcid, err);
+		gc->tone_sent++;
+		gc->tone_next += GIP_AUDIO_INTERVAL_MS;
+	}
+}
+
+/* the headset's start sequence: power-on until it answers; then the test tone */
 static void poll_headset(struct gip_client *gc, u64 now)
 {
 	static const u8 power_on[1] = { GIP_PWR_ON };
 
 	if (!gc->audio_ready)
 		return;
-	if (gc->audio_started || gc->power_tries > GIP_HS_MAX_RETRIES ||
+	if (gc->audio_started) {
+		play_tone(gc, now);
+		return;
+	}
+	if (gc->power_tries > GIP_HS_MAX_RETRIES ||
 	    now < gc->power_last + GIP_HS_START_DELAY_MS)
 		return;
 	if (gc->power_tries++ == GIP_HS_MAX_RETRIES) {

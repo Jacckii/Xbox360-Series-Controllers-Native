@@ -81,6 +81,12 @@ struct gip_client {
 	u8 power_tries;
 	u64 power_last;
 	u32 audio_rx;       /* sample packets received */
+	u8 audio_seq;       /* sequence of the sample packets sent */
+
+	/* stage 2 test: a tone once the headset runs */
+	bool tone_done;
+	u32 tone_pos, tone_sent, tone_failed;
+	u64 tone_next, tone_end;
 
 	struct gip_chunk_buf in;  /* chunked packet being received */
 	struct gip_chunk_buf out; /* chunked packet being sent */

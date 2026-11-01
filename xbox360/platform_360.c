@@ -387,8 +387,11 @@ int xa_usb_ctrl(struct xa_usb *usb, u8 request_type, u8 request, u16 value,
  * in flight also keeps the kernel's unlocked qTD free-list from being over-used. Bring-up
  * (firmware/radio) stays synchronous (xa_out_async=0), where blocking is fine. */
 #define OUT_FIFO 32 /* a power of two */
-#define OUT_BUF 512 /* steady-state packets (GIP acks, rumble, beacons) are small */
-static u8 out_fifo_buf[OUT_FIFO][OUT_BUF] __attribute__((aligned(128)));
+/* steady-state packets: GIP acks, rumble and beacons are small, but a headset's audio
+ * packet is 8 ms of 48 kHz stereo (1536 bytes) plus headers (xone: 0x654 at most).
+ * Aligned to their size, no entry crosses a page. */
+#define OUT_BUF 2048
+static u8 out_fifo_buf[OUT_FIFO][OUT_BUF] __attribute__((aligned(OUT_BUF)));
 static u16 out_fifo_len[OUT_FIFO];
 static volatile u32 out_head, out_tail; /* head: driver thread; tail: Usbd DPC */
 static volatile u32 out_inflight;       /* DPC-owned: a transfer is on the endpoint */
