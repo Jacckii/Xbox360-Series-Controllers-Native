@@ -52,6 +52,8 @@ flowchart LR
 
 ## 🚀 Installation
 
+📺 **[Watch the install guide](https://youtu.be/O4j7Ebvj2YE)** (1:23)
+
 1. Download the zip from the [latest release](../../releases/latest) and extract it (or build
    `xa.xex` yourself, below).
 2. Get the adapter firmware: double-click **`get-firmware.cmd`** in the extracted folder (it
