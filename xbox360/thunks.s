@@ -46,6 +46,9 @@
     NV64_THUNK XaSetStateHook, XaSetStateHookC
     NV64_THUNK XaXamThread, XaXamThreadC
 
+# the audio mixer's per-frame callback (audio_360.c)
+    NV64_THUNK XaMecCallback, XaMecCallbackC
+
 # xa_kcall9(args, fn): calls kernel function fn with the nine u32 arguments at args.
 # The 360 ABI reads a ninth argument from its 8-byte parameter slot, low word at
 # 0x54(r1); clang puts stack arguments elsewhere (96(r1)), so the kernel would read

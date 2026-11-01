@@ -492,12 +492,21 @@ void xa_sleep_ms(unsigned int ms)
 	KeDelayExecutionThread(0, 0, &interval);
 }
 
+/* The CPU's time base (49.875 MHz on Xenon): monotonic. KeQuerySystemTime follows clock
+ * adjustments and was seen stepping back 780 ms, which stalled the headset's audio. (At
+ * 50 MHz, this clock ran 0.25 % slow against the audio mixer's 48 kHz.) */
+#define TIMEBASE_HZ 49875000u
+
 u64 xa_now_ms(void)
 {
-	int64_t t;
+	u32 hi, lo, hi2;
 
-	KeQuerySystemTime(&t);
-	return (u64)t / 10000;
+	do {
+		__asm__ __volatile__("mftbu %0" : "=r"(hi));
+		__asm__ __volatile__("mftb %0" : "=r"(lo));
+		__asm__ __volatile__("mftbu %0" : "=r"(hi2));
+	} while (hi != hi2);
+	return (((u64)hi << 32) | lo) / (TIMEBASE_HZ / 1000);
 }
 
 /* ---- log ring ------------------------------------------------------------------------ */

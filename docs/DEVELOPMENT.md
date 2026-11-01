@@ -42,6 +42,13 @@ few MT76 registers, for comparing what two hosts see.
 cc -O2 -Wall -o test_sha256 tests/test_sha256.c core/sha256.c && ./test_sha256
 ```
 
+`tests/test_pcm.c` checks the integer-only float-to-16-bit conversion of the headset's
+game audio against the float computation:
+
+```bash
+cc -O2 -Wall -o test_pcm tests/test_pcm.c -lm && ./test_pcm
+```
+
 ## Working on the console
 
 `xbox360/xa.py` talks to the console's debug monitor (xbdm, TCP 730). Set the console's

@@ -48,6 +48,28 @@ int xa_random(void *buf, int len)
 	return getrandom(buf, len, 0) == len ? 0 : -XA_EIO;
 }
 
+/* no game audio to capture here: a headset gets silence */
+int xa_audio_start(void)
+{
+	return -XA_ENODEV;
+}
+
+u32 xa_audio_read(s16 *lr, u32 frames)
+{
+	(void)lr, (void)frames;
+	return 0;
+}
+
+u32 xa_audio_available(void)
+{
+	return 0;
+}
+
+void xa_audio_stats(u32 *callbacks, u32 *overruns, u32 *failures)
+{
+	*callbacks = *overruns = *failures = 0;
+}
+
 void xa_sleep_ms(unsigned int ms)
 {
 	struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000 };

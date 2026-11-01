@@ -83,10 +83,13 @@ struct gip_client {
 	u32 audio_rx;       /* sample packets received */
 	u8 audio_seq;       /* sequence of the sample packets sent */
 
-	/* stage 2 test: a tone once the headset runs */
-	bool tone_done;
-	u32 tone_pos, tone_sent, tone_failed;
-	u64 tone_next, tone_end;
+	/* game audio to the headset, one packet per 8 ms */
+	bool audio_streaming;
+	u32 audio_sent, audio_failed, audio_underruns, audio_dropped;
+	u8 audio_prefill;   /* silent packets still to send first */
+	u64 audio_next, audio_stats_at, audio_last_poll;
+	u32 poll_gap_max, burst_max, flow_odd; /* per stats interval */
+	u16 flow_min, flow_max;
 
 	struct gip_chunk_buf in;  /* chunked packet being received */
 	struct gip_chunk_buf out; /* chunked packet being sent */
