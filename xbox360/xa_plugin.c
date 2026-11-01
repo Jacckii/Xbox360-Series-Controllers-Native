@@ -116,6 +116,8 @@ void XaAddDevice(void *node);
 void XaRemoveDevice(void *node);
 long XaCloseDone(struct usbd_transfer *t, long status);
 u32 XaThread(void *context);
+/* a kernel call with nine arguments, the ninth placed where the 360 ABI reads it */
+long xa_kcall9(const u32 args[9], void *fn);
 
 #define BODY __attribute__((used, noinline))
 
@@ -493,8 +495,12 @@ static u8 *load_firmware_at(const char *path, u32 *len, NTSTATUS *status)
 	u32 total = 0;
 
 	/* GENERIC_READ | SYNCHRONIZE, FILE_SHARE_READ, FILE_OPEN,
-	 * FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE */
-	st = NtCreateFile(&file, 0x80100000, &attrs, &io, 0, 0x80, 1, 1, 0x60);
+	 * FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE. The create options are the
+	 * ninth argument: called directly, the kernel read them from a stack slot clang code
+	 * leaves stale, and FILE_DELETE_ON_CLOSE in there deleted the firmware once read. */
+	const u32 args[9] = { (u32)&file, 0x80100000, (u32)&attrs, (u32)&io, 0, 0x80, 1, 1, 0x60 };
+
+	st = xa_kcall9(args, (void *)NtCreateFile);
 	*status = st;
 	if ((s32)st < 0)
 		return NULL;
