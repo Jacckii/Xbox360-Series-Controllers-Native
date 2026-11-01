@@ -54,10 +54,11 @@ enum gip_audio_control {
 };
 
 /* headset start: power-on is repeated until the headset reports its volume or sends
- * samples (as xone); the handshake starts a little after the first one */
+ * samples (as xone). No security handshake: Microsoft's headsets send audio without one
+ * (xone doesn't wait for it either), and the Xbox Wireless Headset (fw 1.0.4.4) asks for
+ * handshake version 3, which isn't known. */
 #define GIP_HS_START_DELAY_MS 500
 #define GIP_HS_MAX_RETRIES 6
-#define GIP_HS_AUTH_DELAY_MS 250
 
 /* GIP audio formats 0x01-0x10: 8, 12, 16, 20, 24, 32, 40, 48 kHz, odd = mono */
 static const u16 gip_audio_rate_khz[8] = { 8, 12, 16, 20, 24, 32, 40, 48 };
@@ -637,7 +638,6 @@ static int handle_audio_control(struct gip_client *gc, const u8 *data, u32 len)
 		gc->audio_ready = true;
 		gc->power_tries = 0;
 		gc->power_last = 0; /* gip_poll sends the first power-on right away */
-		gc->auth_due = xa_now_ms() + GIP_HS_AUTH_DELAY_MS;
 		return 0;
 	case GIP_AUD_CTRL_VOLUME:
 		if (len < 5)
@@ -788,18 +788,13 @@ void gip_set_rumble(struct gip_client *gc, u8 left, u8 right, u8 trigger_left,
 	gc->rumble[3] = MIN(trigger_right, GIP_GP_RUMBLE_MAX);
 }
 
-/* the headset's start sequence: power-on until it answers, the handshake once */
+/* the headset's start sequence: power-on until it answers */
 static void poll_headset(struct gip_client *gc, u64 now)
 {
 	static const u8 power_on[1] = { GIP_PWR_ON };
 
 	if (!gc->audio_ready)
 		return;
-	if (gc->auth_due && now >= gc->auth_due) {
-		gc->auth_due = 0;
-		sha256_init(&gc->auth.transcript);
-		auth_send_hello(gc, false);
-	}
 	if (gc->audio_started || gc->power_tries > GIP_HS_MAX_RETRIES ||
 	    now < gc->power_last + GIP_HS_START_DELAY_MS)
 		return;

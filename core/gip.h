@@ -79,7 +79,7 @@ struct gip_client {
 	bool audio_ready;   /* the headset accepted a format */
 	bool audio_started; /* it reported its volume or sent samples */
 	u8 power_tries;
-	u64 power_last, auth_due;
+	u64 power_last;
 	u32 audio_rx;       /* sample packets received */
 
 	struct gip_chunk_buf in;  /* chunked packet being received */
