@@ -80,6 +80,8 @@ struct gip_client {
 	bool audio_started; /* it reported its volume or sent samples */
 	u8 power_tries;
 	u64 power_last;
+	u8 hs_restarts;     /* start sequences repeated for lack of an answer */
+	u64 hs_deadline;    /* the format answer is due by then (0 = not waiting) */
 	u32 audio_rx;       /* sample packets received */
 	u8 audio_seq;       /* sequence of the sample packets sent */
 

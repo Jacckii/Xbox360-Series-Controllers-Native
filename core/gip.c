@@ -59,6 +59,9 @@ enum gip_audio_control {
  * handshake version 3, which isn't known. */
 #define GIP_HS_START_DELAY_MS 500
 #define GIP_HS_MAX_RETRIES 6
+/* no answer to the format or the power-ons: start over this often */
+#define GIP_HS_FORMAT_TIMEOUT_MS 2000
+#define GIP_HS_MAX_RESTARTS 3
 
 /* sample packets carry 8 ms of 16-bit little-endian PCM (xone GIP_AUDIO_INTERVAL); over
  * the adapter, one packet per interval */
@@ -643,7 +646,26 @@ static int start_headset(struct gip_client *gc)
 	err = send_cmd(gc, GIP_CMD_POWER, GIP_OPT_INTERNAL, power_sleep, sizeof(power_sleep));
 	if (!err)
 		err = suggest_audio_format(gc, gc->audio_formats[0], gc->audio_formats[1]);
+	gc->hs_deadline = xa_now_ms() + GIP_HS_FORMAT_TIMEOUT_MS;
 	return err;
+}
+
+/* the headset didn't answer (seen: no volume or samples after the power-ons until it was
+ * switched off and on): start over from idle, a few times */
+static void restart_headset(struct gip_client *gc, const char *why)
+{
+	gc->audio_ready = false;
+	gc->power_tries = 0;
+	if (gc->hs_restarts >= GIP_HS_MAX_RESTARTS) {
+		xa_log("gip: client %d %s, giving up: switch the headset off and on\n",
+		       gc->xc->wcid, why);
+		gc->hs_deadline = 0;
+		return;
+	}
+	gc->hs_restarts++;
+	xa_log("gip: client %d %s, starting it again (%u of %u)\n", gc->xc->wcid, why,
+	       gc->hs_restarts, GIP_HS_MAX_RESTARTS);
+	start_headset(gc);
 }
 
 static int handle_audio_control(struct gip_client *gc, const u8 *data, u32 len)
@@ -792,6 +814,8 @@ static void reset_session(struct gip_client *gc)
 	gc->audio_format_count = gc->audio_in = gc->audio_out = 0;
 	gc->audio_ready = gc->audio_started = false;
 	gc->power_tries = 0;
+	gc->hs_restarts = 0;
+	gc->hs_deadline = 0;
 	gc->audio_rx = 0;
 	gc->audio_seq = 0;
 	gc->audio_streaming = false;
@@ -959,18 +983,19 @@ static void poll_headset(struct gip_client *gc, u64 now)
 {
 	static const u8 power_on[1] = { GIP_PWR_ON };
 
-	if (!gc->audio_ready)
+	if (!gc->audio_ready) {
+		if (gc->hs_deadline && now >= gc->hs_deadline)
+			restart_headset(gc, "didn't answer the audio format");
 		return;
+	}
 	if (gc->audio_started) {
 		stream_audio(gc, now);
 		return;
 	}
-	if (gc->power_tries > GIP_HS_MAX_RETRIES ||
-	    now < gc->power_last + GIP_HS_START_DELAY_MS)
+	if (now < gc->power_last + GIP_HS_START_DELAY_MS)
 		return;
 	if (gc->power_tries++ == GIP_HS_MAX_RETRIES) {
-		xa_log("gip: client %d sent no volume or samples after %u power-ons\n",
-		       gc->xc->wcid, GIP_HS_MAX_RETRIES);
+		restart_headset(gc, "sent no volume or samples after the power-ons");
 		return;
 	}
 	send_cmd(gc, GIP_CMD_POWER, GIP_OPT_INTERNAL, power_on, sizeof(power_on));
