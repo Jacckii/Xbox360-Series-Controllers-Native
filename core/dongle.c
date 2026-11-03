@@ -72,6 +72,8 @@ static void pairing_scan(struct xa_dongle *dongle, u64 now)
 	dongle->last_wlan_rx = now;
 }
 
+static int remove_client(struct xa_dongle *dongle, u8 wcid);
+
 void xa_dongle_poll(struct xa_dongle *dongle)
 {
 	u64 now = xa_now_ms();
@@ -91,6 +93,20 @@ void xa_dongle_poll(struct xa_dongle *dongle)
 		dongle->next_rx_check = now + 2000;
 	}
 
+	/* associated but silent: after a warm reboot a client can hang in the old session
+	 * (seen with the headset); dropping it makes it connect again */
+	for (int i = 0; i < XA_DONGLE_MAX_CLIENTS; i++) {
+		struct xa_client *client = dongle->clients[i];
+
+		if (client && !client->active && now - client->associated_ms > XA_DONGLE_SILENT_MS) {
+			xa_log("dongle: client %d silent since it associated (asked again %u times, "
+			       "%u other frames, last %04x), dropping it\n", client->wcid,
+			       client->asks, client->frames, client->last_fc);
+			xa_mt_send_disassoc(&dongle->mt, client->address);
+			remove_client(dongle, client->wcid);
+		}
+	}
+
 	if (!dongle->pairing)
 		return;
 
@@ -102,8 +118,6 @@ void xa_dongle_poll(struct xa_dongle *dongle)
 	if (now >= dongle->next_scan && !dongle->no_scan)
 		pairing_scan(dongle, now);
 }
-
-static int remove_client(struct xa_dongle *dongle, u8 wcid);
 
 void xa_dongle_stop(struct xa_dongle *dongle)
 {
@@ -148,6 +162,7 @@ static int add_client(struct xa_dongle *dongle, const u8 *addr)
 
 		/* silent since: it never got our association response */
 		if (!client->active) {
+			client->asks++;
 			if (xa_debug)
 				xa_log("dongle: client %d asks again, resending the response\n",
 				       client->wcid);
@@ -171,6 +186,7 @@ static int add_client(struct xa_dongle *dongle, const u8 *addr)
 		return -XA_ENOMEM;
 	client->dongle = dongle;
 	client->wcid = i + 1;
+	client->associated_ms = xa_now_ms();
 	memcpy(client->address, addr, ETH_ALEN);
 
 	err = xa_mt_associate_client(&dongle->mt, client->wcid, addr);
@@ -327,6 +343,20 @@ static void process_frame(struct xa_dongle *dongle, const u8 *frame, int len,
 				       "%d bytes%s\n", fc, wcid, frame[10], frame[11], frame[12],
 				       frame[13], frame[14], frame[15], len,
 				       fc & IEEE80211_FCTL_PROTECTED ? " (protected)" : "");
+	}
+
+	/* what a client that associated but sends no data does send */
+	if ((fc & (IEEE80211_FCTL_FTYPE | IEEE80211_FCTL_STYPE)) !=
+	    (IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ASSOC_REQ)) {
+		for (int i = 0; i < XA_DONGLE_MAX_CLIENTS; i++) {
+			struct xa_client *client = dongle->clients[i];
+
+			if (client && !client->active &&
+			    !memcmp(client->address, frame + 10, ETH_ALEN)) {
+				client->frames++;
+				client->last_fc = fc;
+			}
+		}
 	}
 
 	switch (fc & (IEEE80211_FCTL_FTYPE | IEEE80211_FCTL_STYPE)) {
