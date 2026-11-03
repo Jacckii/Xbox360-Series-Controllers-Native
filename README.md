@@ -31,6 +31,7 @@ flowchart LR
 
 - 🎮 **Up to four Series X|S controllers** at once, as standard XInput controllers.
 - 📳 **Rumble**, all buttons, triggers and sticks, and the **Guide button** (opens the guide).
+- 🎧 **Xbox Wireless Headset**: pairs like a controller and plays the console's game audio.
 - 🔌 **Loads at boot** as a `launch.ini` plugin and picks up an adapter that's already plugged
   in. No replugging.
 - 🔁 Paired controllers **reconnect by themselves** whenever they're switched on.
@@ -105,7 +106,10 @@ dashboard is up, *Wireless adapter: ready*.
   does nothing on a mismatch.
 - Controllers that use the older (v1, RSA) security handshake don't pair yet. Series X|S
   controllers use the newer (v2, ECDH) handshake and work.
-- Headsets and chatpads aren't supported.
+- The headset's **microphone** is handed to the console as the first controller's voice device,
+  but hasn't been tested with a game or app that uses voice chat yet. Games that only take USB
+  microphones for singing (Rock Band 3, for one) don't use it.
+- Chatpads aren't supported.
 
 ## ❓ FAQ
 
