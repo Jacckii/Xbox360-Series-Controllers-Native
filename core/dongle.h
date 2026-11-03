@@ -10,6 +10,7 @@
 #define XA_DONGLE_MAX_CLIENTS 16
 #define XA_DONGLE_PAIRING_TIMEOUT_MS 60000
 #define XA_DONGLE_PAIR_SCAN_INTERVAL_MS 2000
+#define XA_DONGLE_SILENT_MS 10000 /* associated without sending data: dropped */
 
 /* IN endpoints and the buffer size each needs */
 #define XA_DONGLE_LEN_CMD_PKT 0x0654
@@ -28,6 +29,10 @@ struct xa_client {
 	u8 address[ETH_ALEN];
 	bool encryption_enabled;
 	bool active; /* has sent data since it associated */
+	u64 associated_ms;
+	/* until active, for the log when it is dropped: association requests repeated,
+	 * other frames from its address and the last one's frame control */
+	u16 asks, frames, last_fc;
 	void *priv;  /* owned by the protocol layer */
 };
 

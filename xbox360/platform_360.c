@@ -387,8 +387,11 @@ int xa_usb_ctrl(struct xa_usb *usb, u8 request_type, u8 request, u16 value,
  * in flight also keeps the kernel's unlocked qTD free-list from being over-used. Bring-up
  * (firmware/radio) stays synchronous (xa_out_async=0), where blocking is fine. */
 #define OUT_FIFO 32 /* a power of two */
-#define OUT_BUF 512 /* steady-state packets (GIP acks, rumble, beacons) are small */
-static u8 out_fifo_buf[OUT_FIFO][OUT_BUF] __attribute__((aligned(128)));
+/* steady-state packets: GIP acks, rumble and beacons are small, but a headset's audio
+ * packet is 8 ms of 48 kHz stereo (1536 bytes) plus headers (xone: 0x654 at most).
+ * Aligned to their size, no entry crosses a page. */
+#define OUT_BUF 2048
+static u8 out_fifo_buf[OUT_FIFO][OUT_BUF] __attribute__((aligned(OUT_BUF)));
 static u16 out_fifo_len[OUT_FIFO];
 static volatile u32 out_head, out_tail; /* head: driver thread; tail: Usbd DPC */
 static volatile u32 out_inflight;       /* DPC-owned: a transfer is on the endpoint */
@@ -489,12 +492,21 @@ void xa_sleep_ms(unsigned int ms)
 	KeDelayExecutionThread(0, 0, &interval);
 }
 
+/* The CPU's time base (49.875 MHz on Xenon): monotonic. KeQuerySystemTime follows clock
+ * adjustments and was seen stepping back 780 ms, which stalled the headset's audio. (At
+ * 50 MHz, this clock ran 0.25 % slow against the audio mixer's 48 kHz.) */
+#define TIMEBASE_HZ 49875000u
+
 u64 xa_now_ms(void)
 {
-	int64_t t;
+	u32 hi, lo, hi2;
 
-	KeQuerySystemTime(&t);
-	return (u64)t / 10000;
+	do {
+		__asm__ __volatile__("mftbu %0" : "=r"(hi));
+		__asm__ __volatile__("mftb %0" : "=r"(lo));
+		__asm__ __volatile__("mftbu %0" : "=r"(hi2));
+	} while (hi != hi2);
+	return (((u64)hi << 32) | lo) / (TIMEBASE_HZ / 1000);
 }
 
 /* ---- log ring ------------------------------------------------------------------------ */

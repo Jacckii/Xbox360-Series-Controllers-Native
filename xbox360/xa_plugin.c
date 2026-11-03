@@ -19,6 +19,7 @@
 #include "../core/gip.h"
 #include "../core/platform.h"
 #include "platform_360.h"
+#include "voice_360.h"
 #include "xinput_360.h"
 
 #define BARRIER() __asm__ __volatile__("lwsync" ::: "memory")
@@ -640,6 +641,7 @@ static void do_unload(void)
 	xa_usb_out_async(0);
 	g_usb.gone = 1; /* stop IN re-queue; in-flight transfers finish with done */
 	BARRIER();
+	xa_voice_shutdown();
 	xa_xinput_shutdown();        /* removes the kernel/XAM hooks after a quiesce */
 	xa_usbd_run(unlink_driver, NULL);
 	wait_ms(50);
@@ -664,7 +666,8 @@ static volatile int g_release; /* cmd_release seen: the main loop hands over */
 static void do_release(void)
 {
 	xa_log("xa: releasing the adapter (node %08x) to the next build\n", (u32)g_usb.node);
-	xa_xinput_release();         /* pads unbound in XAM, then the hooks removed */
+	xa_voice_shutdown();
+	xa_xinput_release();         /* pads and microphone unbound in XAM, then the hooks removed */
 	xa_usbd_run(unlink_driver, NULL);
 	wait_ms(50);
 	g_usb.gone = 1;              /* stop IN re-queue; the next build's reset removes us */
@@ -841,6 +844,7 @@ static void run_adapter(const u8 *fw, u32 fw_len)
 				gip_set_rumble(gc, left, right, left, right);
 			gip_poll(gc);
 		}
+		xa_voice_tick();
 		service_commands();
 		xa_sleep_ms(2);
 	}
@@ -955,6 +959,7 @@ BODY u32 XaThreadC(void *context)
 	/* as a boot plugin we can be up before XAM or the drives: retry those */
 	for (unsigned int ms = 0; xa_xinput_init() == -XA_ENODEV && ms < BOOT_RETRY_MS; ms += 1000)
 		wait_ms(1000);
+	xa_voice_init(); /* without it, a headset still plays; its microphone stays unused */
 	for (unsigned int ms = 0; !load_all_firmware() && ms < BOOT_RETRY_MS; ms += 1000)
 		wait_ms(1000);
 	if (!load_all_firmware()) {

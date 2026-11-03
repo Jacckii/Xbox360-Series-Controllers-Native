@@ -36,10 +36,63 @@ enum gip_command {
 	GIP_CMD_POWER = 0x05,
 	GIP_CMD_AUTHENTICATE = 0x06,
 	GIP_CMD_VIRTUAL_KEY = 0x07,
+	GIP_CMD_AUDIO_CONTROL = 0x08,
 	GIP_CMD_RUMBLE = 0x09,
 	GIP_CMD_LED = 0x0a,
 	GIP_CMD_INPUT = 0x20,
+	GIP_CMD_AUDIO_SAMPLES = 0x60,
 };
+
+enum gip_power_mode {
+	GIP_PWR_ON = 0x00,
+	GIP_PWR_SLEEP = 0x01,
+};
+
+enum gip_audio_control {
+	GIP_AUD_CTRL_FORMAT = 0x02,
+	GIP_AUD_CTRL_VOLUME = 0x03,
+};
+
+/* headset start: power-on is repeated until the headset reports its volume or sends
+ * samples (as xone). No security handshake: Microsoft's headsets send audio without one
+ * (xone doesn't wait for it either), and the Xbox Wireless Headset (fw 1.0.4.4) asks for
+ * handshake version 3, which isn't known. */
+#define GIP_HS_START_DELAY_MS 500
+#define GIP_HS_MAX_RETRIES 6
+/* no answer to the format or the power-ons: start over this often */
+#define GIP_HS_FORMAT_TIMEOUT_MS 2000
+#define GIP_HS_MAX_RESTARTS 3
+
+/* sample packets carry 8 ms of 16-bit little-endian PCM (xone GIP_AUDIO_INTERVAL); over
+ * the adapter, one packet per interval */
+#define GIP_AUDIO_INTERVAL_MS 8
+#define GIP_AUDIO_MAX_BYTES (48 * 2 * 2 * GIP_AUDIO_INTERVAL_MS) /* 48 kHz stereo */
+
+/* game audio: GIP format 0x10 (48 kHz stereo) is the one the capture delivers */
+#define GIP_AUDIO_FMT_48KHZ_STEREO 0x10
+#define GIP_AUDIO_FRAMES (48 * GIP_AUDIO_INTERVAL_MS)
+/*
+ * Game audio is paced by the mixer, not by a clock: a packet goes out whenever 8 ms of
+ * its output are there, so exactly as much leaves as the console renders. (Paced by the
+ * CPU time base it drifted: the mixer delivered 0.25 % more, the backlog grew and was
+ * cut every 30-40 s, an audible gap.) Only when the mixer delivers nothing for
+ * GIP_AUDIO_IDLE_MS does silence keep the headset fed at the interval.
+ *
+ * The poll loop runs about every 16 ms and stalls now and then (opening the Guide: tens
+ * of ms). At most GIP_AUDIO_PER_PASS packets go per pass, so a backlog drains gradually
+ * instead of in a burst; GIP_AUDIO_PREFILL packets of silence at the start give the
+ * headset's own buffer a cushion. A backlog over GIP_AUDIO_MAX_QUEUED packets is cut
+ * down to GIP_AUDIO_KEEP, which bounds the latency.
+ */
+#define GIP_AUDIO_PER_PASS 3
+#define GIP_AUDIO_PREFILL 2
+#define GIP_AUDIO_IDLE_MS (3 * GIP_AUDIO_INTERVAL_MS)
+#define GIP_AUDIO_MAX_QUEUED 16
+#define GIP_AUDIO_KEEP 4
+#define GIP_AUDIO_STATS_MS 10000
+
+/* GIP audio formats 0x01-0x10: 8, 12, 16, 20, 24, 32, 40, 48 kHz, odd = mono */
+static const u16 gip_audio_rate_khz[8] = { 8, 12, 16, 20, 24, 32, 40, 48 };
 
 enum gip_option {
 	GIP_OPT_ACKNOWLEDGE = BIT(4),
@@ -460,7 +513,8 @@ static int auth_complete(struct gip_client *gc)
 
 	gc->auth.done = true;
 	xa_log("gip: client %d authenticated\n", gc->xc->wcid);
-	if (gc->ops && gc->ops->ready)
+	/* the ops present gamepads; a headset has no pad to bind */
+	if (gc->gamepad && gc->ops && gc->ops->ready)
 		gc->ops->ready(gc);
 	return 0;
 }
@@ -558,6 +612,122 @@ static int start_gamepad(struct gip_client *gc)
 	return err;
 }
 
+/* for the log: a format's rate in kHz (0 = unknown) and its channels */
+static u16 format_khz(u8 format)
+{
+	return format >= 1 && format <= 16 ? gip_audio_rate_khz[(format - 1) / 2] : 0;
+}
+
+static const char *format_channels(u8 format)
+{
+	return (format & 1) ? "mono" : "stereo";
+}
+
+static int suggest_audio_format(struct gip_client *gc, u8 in, u8 out)
+{
+	const u8 pkt[3] = { GIP_AUD_CTRL_FORMAT, in, out };
+
+	gc->audio_in = in;
+	gc->audio_out = out;
+	return send_cmd(gc, GIP_CMD_AUDIO_CONTROL, GIP_OPT_INTERNAL, pkt, sizeof(pkt));
+}
+
+/* as xone's headset driver: idle, then suggest the first format pair it offered; the
+ * power-on and the handshake follow once it accepts one */
+static int start_headset(struct gip_client *gc)
+{
+	static const u8 power_sleep[1] = { GIP_PWR_SLEEP };
+	int err;
+
+	if (!gc->audio_format_count) {
+		xa_log("gip: client %d is a headset without audio formats\n", gc->xc->wcid);
+		return 0;
+	}
+	err = send_cmd(gc, GIP_CMD_POWER, GIP_OPT_INTERNAL, power_sleep, sizeof(power_sleep));
+	if (!err)
+		err = suggest_audio_format(gc, gc->audio_formats[0], gc->audio_formats[1]);
+	gc->hs_deadline = xa_now_ms() + GIP_HS_FORMAT_TIMEOUT_MS;
+	return err;
+}
+
+/* the headset didn't answer (seen: no volume or samples after the power-ons until it was
+ * switched off and on): start over from idle, a few times */
+static void restart_headset(struct gip_client *gc, const char *why)
+{
+	gc->audio_ready = false;
+	gc->power_tries = 0;
+	if (gc->hs_restarts >= GIP_HS_MAX_RESTARTS) {
+		xa_log("gip: client %d %s, giving up: switch the headset off and on\n",
+		       gc->xc->wcid, why);
+		gc->hs_deadline = 0;
+		return;
+	}
+	gc->hs_restarts++;
+	xa_log("gip: client %d %s, starting it again (%u of %u)\n", gc->xc->wcid, why,
+	       gc->hs_restarts, GIP_HS_MAX_RESTARTS);
+	start_headset(gc);
+}
+
+static int handle_audio_control(struct gip_client *gc, const u8 *data, u32 len)
+{
+	if (!len || !gc->headset)
+		return -XA_EINVAL;
+
+	switch (data[0]) {
+	case GIP_AUD_CTRL_FORMAT:
+		if (len != 3 || gc->audio_ready)
+			return -XA_EINVAL;
+		if (data[1] != gc->audio_in || data[2] != gc->audio_out) {
+			xa_log("gip: client %d wants audio %02x/%02x instead\n", gc->xc->wcid,
+			       data[1], data[2]);
+			return suggest_audio_format(gc, data[1], data[2]);
+		}
+		xa_log("gip: client %d audio accepted: in %u kHz %s, out %u kHz %s\n",
+		       gc->xc->wcid, format_khz(data[1]), format_channels(data[1]),
+		       format_khz(data[2]), format_channels(data[2]));
+		gc->audio_ready = true;
+		gc->power_tries = 0;
+		gc->power_last = 0; /* gip_poll sends the first power-on right away */
+		return 0;
+	case GIP_AUD_CTRL_VOLUME:
+		if (len < 5)
+			return -XA_EINVAL;
+		xa_log("gip: client %d volume: mute %u, out %u, chat %u, in %u\n", gc->xc->wcid,
+		       data[1], data[2], data[3], data[4]);
+		gc->audio_started = true;
+		return 0;
+	}
+	xa_log("gip: client %d audio control %02x (%u bytes)\n", gc->xc->wcid, data[0], len);
+	return 0;
+}
+
+static int handle_audio_samples(struct gip_client *gc, const u8 *data, u32 len)
+{
+	if (!gc->headset)
+		return -XA_EINVAL;
+	/* the packet starts with the headset's flow rate: the output bytes it wants per
+	 * interval (xone only logs it); watched to see how it reacts to our pacing */
+	if (len >= 2) {
+		u16 flow = get_le16(data);
+
+		if (flow < gc->flow_min || !gc->flow_min)
+			gc->flow_min = flow;
+		if (flow > gc->flow_max)
+			gc->flow_max = flow;
+		if (flow != GIP_AUDIO_MAX_BYTES)
+			gc->flow_odd++;
+	}
+	/* the first one, then every 1000th: enough to see the microphone stream runs */
+	if (gc->audio_rx++ % 1000 == 0)
+		xa_log("gip: client %d audio samples: %u bytes (%u packets)\n", gc->xc->wcid, len,
+		       gc->audio_rx);
+	gc->audio_started = true;
+	/* after the flow rate: the microphone's samples, for the host's voice chat */
+	if (len > 2 && (gc->audio_in & 1))
+		xa_voice_mic(data + 2, len - 2, format_khz(gc->audio_in));
+	return 0;
+}
+
 static int handle_announce(struct gip_client *gc, const u8 *data, u32 len)
 {
 	if (len != 28)
@@ -587,6 +757,27 @@ static int handle_identify(struct gip_client *gc, const u8 *data, u32 len)
 		return 0;
 
 	blen = len - 16;
+
+	/* audio formats: a count, then (in, out) pairs; 0 = none */
+	off = get_le16(data + 20);
+	if (off && off + 1 <= blen) {
+		u8 n = base[off];
+
+		if (off + 1 + 2 * n <= blen) {
+			if (n > GIP_AUDIO_FORMATS_MAX)
+				n = GIP_AUDIO_FORMATS_MAX;
+			memcpy(gc->audio_formats, base + off + 1, 2 * n);
+			gc->audio_format_count = n;
+			for (u8 i = 0; i < n; i++)
+				xa_log("gip: client %d audio format %u: in %02x (%u kHz %s), "
+				       "out %02x (%u kHz %s)\n", gc->xc->wcid, i,
+				       base[off + 1 + 2 * i], format_khz(base[off + 1 + 2 * i]),
+				       format_channels(base[off + 1 + 2 * i]),
+				       base[off + 2 + 2 * i], format_khz(base[off + 2 + 2 * i]),
+				       format_channels(base[off + 2 + 2 * i]));
+		}
+	}
+
 	off = get_le16(data + 26); /* classes */
 	if (off + 1 > blen)
 		return -XA_EINVAL;
@@ -605,11 +796,15 @@ static int handle_identify(struct gip_client *gc, const u8 *data, u32 len)
 		xa_log("gip: client %d class %.*s\n", gc->xc->wcid, str_len, (const char *)base + off);
 		if (str_len == 26 && !memcmp(base + off, "Windows.Xbox.Input.Gamepad", 26))
 			gc->gamepad = true;
+		if (str_len == 26 && !memcmp(base + off, "Windows.Xbox.Input.Headset", 26))
+			gc->headset = true;
 		off += str_len;
 	}
 
 	gc->identified = true;
-	return gc->gamepad ? start_gamepad(gc) : 0;
+	if (gc->gamepad)
+		return start_gamepad(gc);
+	return gc->headset ? start_headset(gc) : 0;
 }
 
 /* forget the session; the controller announces itself again when it comes back */
@@ -617,8 +812,22 @@ static void reset_session(struct gip_client *gc)
 {
 	free_chunk(&gc->in);
 	free_chunk(&gc->out);
-	gc->identified = gc->gamepad = false;
+	gc->identified = gc->gamepad = gc->headset = false;
 	gc->vendor = gc->product = gc->version = 0;
+	gc->audio_format_count = gc->audio_in = gc->audio_out = 0;
+	gc->audio_ready = gc->audio_started = false;
+	gc->power_tries = 0;
+	gc->hs_restarts = 0;
+	gc->hs_deadline = 0;
+	gc->audio_rx = 0;
+	gc->audio_seq = 0;
+	gc->audio_streaming = false;
+	gc->audio_sent = gc->audio_failed = gc->audio_underruns = gc->audio_dropped = 0;
+	gc->audio_prefill = 0;
+	gc->audio_last_poll = 0;
+	gc->poll_gap_max = gc->burst_max = gc->flow_odd = 0;
+	gc->flow_min = gc->flow_max = 0;
+	gc->audio_next = gc->audio_stats_at = 0;
 	memset(&gc->auth, 0, sizeof(gc->auth));
 	memset(&gc->state, 0, sizeof(gc->state));
 	memset(gc->rumble, 0, sizeof(gc->rumble));
@@ -653,11 +862,158 @@ void gip_set_rumble(struct gip_client *gc, u8 left, u8 right, u8 trigger_left,
 	gc->rumble[3] = MIN(trigger_right, GIP_GP_RUMBLE_MAX);
 }
 
+static int send_audio(struct gip_client *gc, const u8 *samples, u32 len)
+{
+	u8 buf[8 + GIP_AUDIO_MAX_BYTES];
+	struct gip_header hdr = {
+		.command = GIP_CMD_AUDIO_SAMPLES,
+		.options = GIP_OPT_INTERNAL,
+		.packet_length = len,
+	};
+	int hdr_len = header_length(&hdr);
+
+	if (len > GIP_AUDIO_MAX_BYTES)
+		return -XA_ENOSPC;
+	/* sequence numbers are never zero */
+	if (!++gc->audio_seq)
+		++gc->audio_seq;
+	hdr.sequence = gc->audio_seq;
+	encode_header(&hdr, buf);
+	memcpy(buf + hdr_len, samples, len);
+	return xa_dongle_send(gc->xc, buf, hdr_len + len, XA_DONGLE_QUEUE_AUDIO);
+}
+
+/* the next 8 ms of the console's mix (silence where none was captured) */
+static int send_game_audio(struct gip_client *gc, bool silence)
+{
+	s16 lr[2 * GIP_AUDIO_FRAMES];
+	u8 pcm[GIP_AUDIO_MAX_BYTES];
+	u32 queued = xa_audio_available(), got = 0;
+
+	if (queued > GIP_AUDIO_MAX_QUEUED * GIP_AUDIO_FRAMES) {
+		u32 excess = queued - GIP_AUDIO_KEEP * GIP_AUDIO_FRAMES;
+
+		gc->audio_dropped += xa_audio_read(NULL, excess);
+	}
+	if (!silence)
+		got = xa_audio_read(lr, GIP_AUDIO_FRAMES);
+	if (got < GIP_AUDIO_FRAMES) {
+		memset(lr + 2 * got, 0, (GIP_AUDIO_FRAMES - got) * 2 * sizeof(*lr));
+		gc->audio_underruns++;
+	}
+	for (u32 i = 0; i < 2 * GIP_AUDIO_FRAMES; i++) /* 16-bit little-endian */
+		put_le16(pcm + 2 * i, (u16)lr[i]);
+	return send_audio(gc, pcm, sizeof(pcm));
+}
+
+static void stream_audio(struct gip_client *gc, u64 now)
+{
+	if (!gc->audio_streaming) {
+		int err;
+
+		/* other rates would need resampling */
+		if (gc->audio_out != GIP_AUDIO_FMT_48KHZ_STEREO) {
+			if (!gc->audio_stats_at)
+				xa_log("gip: client %d game audio needs 48 kHz stereo, not %02x\n",
+				       gc->xc->wcid, gc->audio_out);
+			gc->audio_stats_at = 1; /* said once */
+			return;
+		}
+		err = xa_audio_start();
+		xa_log("gip: client %d game audio: %s (%d)\n", gc->xc->wcid,
+		       err ? "no capture, silence" : "capturing the console's mix", err);
+		xa_audio_read(NULL, xa_audio_available()); /* start from now */
+		gc->audio_streaming = true;
+		gc->audio_prefill = GIP_AUDIO_PREFILL;
+		gc->audio_next = now + GIP_AUDIO_IDLE_MS;
+		gc->audio_stats_at = now + GIP_AUDIO_STATS_MS;
+	}
+
+	if (gc->audio_last_poll && now - gc->audio_last_poll > gc->poll_gap_max)
+		gc->poll_gap_max = (u32)(now - gc->audio_last_poll);
+	gc->audio_last_poll = now;
+
+	u32 burst = 0;
+
+	while (burst < GIP_AUDIO_PER_PASS) {
+		bool prefill = gc->audio_prefill > 0;
+		bool ready = !prefill && xa_audio_available() >= GIP_AUDIO_FRAMES;
+		int err;
+
+		if (!prefill && !ready && now < gc->audio_next)
+			break;
+		err = send_game_audio(gc, prefill);
+		if (err && !gc->audio_failed++)
+			xa_log("gip: client %d audio send failed: %d\n", gc->xc->wcid, err);
+		gc->audio_sent++;
+		burst++;
+		if (prefill) {
+			gc->audio_prefill--;
+		} else if (ready) {
+			gc->audio_next = now + GIP_AUDIO_IDLE_MS;
+		} else {
+			/* the mixer is idle: silence at the interval, never more than one late */
+			gc->audio_next += GIP_AUDIO_INTERVAL_MS;
+			if (gc->audio_next + GIP_AUDIO_INTERVAL_MS < now)
+				gc->audio_next = now;
+		}
+	}
+	if (burst > gc->burst_max)
+		gc->burst_max = burst;
+
+	if (now >= gc->audio_stats_at) {
+		u32 callbacks, overruns, failures;
+
+		xa_audio_stats(&callbacks, &overruns, &failures);
+		xa_log("gip: client %d audio: %u sent (%u failed), %u short, %u frames dropped; "
+		       "mixer %u callbacks, %u overruns, %u failed\n", gc->xc->wcid, gc->audio_sent,
+		       gc->audio_failed, gc->audio_underruns, gc->audio_dropped, callbacks,
+		       overruns, failures);
+		/* this interval only: the longest poll gap and burst, the headset's flow rate */
+		xa_log("gip: client %d audio timing: poll gap max %u ms, burst max %u, queued %u "
+		       "frames; flow %u..%u (%u not %u)\n", gc->xc->wcid, gc->poll_gap_max,
+		       gc->burst_max, xa_audio_available(), gc->flow_min, gc->flow_max,
+		       gc->flow_odd, GIP_AUDIO_MAX_BYTES);
+		gc->poll_gap_max = gc->burst_max = 0;
+		gc->flow_min = gc->flow_max = 0;
+		gc->flow_odd = 0;
+		gc->audio_stats_at += GIP_AUDIO_STATS_MS;
+	}
+}
+
+/* the headset's start sequence: power-on until it answers; then game audio */
+static void poll_headset(struct gip_client *gc, u64 now)
+{
+	static const u8 power_on[1] = { GIP_PWR_ON };
+
+	if (!gc->audio_ready) {
+		if (gc->hs_deadline && now >= gc->hs_deadline)
+			restart_headset(gc, "didn't answer the audio format");
+		return;
+	}
+	if (gc->audio_started) {
+		stream_audio(gc, now);
+		return;
+	}
+	if (now < gc->power_last + GIP_HS_START_DELAY_MS)
+		return;
+	if (gc->power_tries++ == GIP_HS_MAX_RETRIES) {
+		restart_headset(gc, "sent no volume or samples after the power-ons");
+		return;
+	}
+	send_cmd(gc, GIP_CMD_POWER, GIP_OPT_INTERNAL, power_on, sizeof(power_on));
+	gc->power_last = now;
+}
+
 void gip_poll(struct gip_client *gc)
 {
 	u64 now = xa_now_ms();
 	u8 pkt[9];
 
+	if (gc->headset) {
+		poll_headset(gc, now);
+		return;
+	}
 	if (!gc->auth.done || !memcmp(gc->rumble, gc->rumble_sent, sizeof(gc->rumble)))
 		return;
 
@@ -727,12 +1083,18 @@ static int dispatch(struct gip_client *gc, const struct gip_header *hdr, const u
 			return auth_rx(gc, data, len);
 		case GIP_CMD_VIRTUAL_KEY:
 			return handle_virtual_key(gc, data, len);
+		case GIP_CMD_AUDIO_CONTROL:
+			return handle_audio_control(gc, data, len);
+		case GIP_CMD_AUDIO_SAMPLES:
+			return handle_audio_samples(gc, data, len);
 		}
 		return 0;
 	}
 
 	if (hdr->command == GIP_CMD_INPUT)
 		return handle_input(gc, data, len);
+	if (hdr->command == GIP_CMD_AUDIO_SAMPLES)
+		return handle_audio_samples(gc, data, len);
 	return 0;
 }
 

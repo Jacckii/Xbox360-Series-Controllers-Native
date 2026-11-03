@@ -54,7 +54,7 @@ CORE="../core/mt76.c ../core/dongle.c ../core/gip.c ../core/sha256.c ../third_pa
 
 $TC/bin/clang -O2 -Wall -Wno-unused-parameter $CFLAGS_DLL $ECC_FLAGS $DLL_LINK,/base:$BASE \
     -DXA_NAME="\"$NAME.xex\"" \
-    thunks.s xa_plugin.c platform_360.c xinput_360.c detour.c $CORE -o out/$NAME.exe
+    thunks.s xa_plugin.c platform_360.c xinput_360.c detour.c audio_360.c voice_360.c $CORE -o out/$NAME.exe
 $TC/bin/synthxex-patched -i out/$NAME.exe -o out/$NAME.xex -t sysdll >/dev/null
 
 $TC/bin/clang -O2 loader.c -Wl,/entry:stage_entry -DPLUGIN_NAME="\"$NAME.xex\"" \

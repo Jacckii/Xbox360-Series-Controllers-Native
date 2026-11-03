@@ -99,6 +99,8 @@ int xa_mt_send_command(struct xa_mt *mt, struct xa_msg *msg, u32 cmd);
 int xa_mt_pair_client(struct xa_mt *mt, const u8 *addr);
 int xa_mt_associate_client(struct xa_mt *mt, u8 wcid, const u8 *addr);
 int xa_mt_send_assoc_response(struct xa_mt *mt, const u8 *addr);
+/* tell a client it is no longer associated (one that hangs in an old session) */
+int xa_mt_send_disassoc(struct xa_mt *mt, const u8 *addr);
 int xa_mt_send_client_command(struct xa_mt *mt, u8 wcid, const u8 *addr,
 			      enum xa_mt_client_command cmd, const u8 *data,
 			      int len);

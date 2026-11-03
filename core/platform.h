@@ -23,6 +23,21 @@ int xa_usb_bulk_out(struct xa_usb *usb, u8 ep, const void *data, int len);
 /* cryptographically secure random bytes; returns 0 or a negative error */
 int xa_random(void *buf, int len);
 
+/*
+ * Game audio for a headset: the host's stereo mix at 48 kHz, 16-bit, interleaved L R.
+ * start begins capturing (0, or a negative error where there is none); read takes up to
+ * frames captured frames (lr = NULL drops them) and returns how many; stats are counters
+ * for the log (mixer callbacks, frames dropped because the ring was full, failed captures).
+ */
+int xa_audio_start(void);
+u32 xa_audio_read(s16 *lr, u32 frames);
+u32 xa_audio_available(void);
+void xa_audio_stats(u32 *callbacks, u32 *overruns, u32 *failures);
+
+/* a headset's microphone: mono 16-bit little-endian samples at khz, for the host's voice
+ * chat (ignored where there is none) */
+void xa_voice_mic(const u8 *pcm_le, u32 bytes, u32 khz);
+
 void xa_sleep_ms(unsigned int ms);
 u64 xa_now_ms(void);
 void xa_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

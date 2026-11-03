@@ -13,6 +13,8 @@
 #define GIP_AUTH_RANDOM_LEN 32
 #define GIP_AUTH_SECRET_LEN 48
 #define GIP_AUTH2_PUBKEY_LEN 64
+/* audio format pairs (in, out) kept from a headset's identify packet */
+#define GIP_AUDIO_FORMATS_MAX 8
 
 /* gamepad state in GIP's own units */
 struct gip_gamepad_state {
@@ -69,7 +71,27 @@ struct gip_client {
 
 	u8 sequence;
 	u16 vendor, product, version;
-	bool identified, gamepad;
+	bool identified, gamepad, headset;
+
+	/* headset: offered formats, the pair agreed on, and the start sequence */
+	u8 audio_formats[2 * GIP_AUDIO_FORMATS_MAX], audio_format_count;
+	u8 audio_in, audio_out;
+	bool audio_ready;   /* the headset accepted a format */
+	bool audio_started; /* it reported its volume or sent samples */
+	u8 power_tries;
+	u64 power_last;
+	u8 hs_restarts;     /* start sequences repeated for lack of an answer */
+	u64 hs_deadline;    /* the format answer is due by then (0 = not waiting) */
+	u32 audio_rx;       /* sample packets received */
+	u8 audio_seq;       /* sequence of the sample packets sent */
+
+	/* game audio to the headset, one packet per 8 ms */
+	bool audio_streaming;
+	u32 audio_sent, audio_failed, audio_underruns, audio_dropped;
+	u8 audio_prefill;   /* silent packets still to send first */
+	u64 audio_next, audio_stats_at, audio_last_poll;
+	u32 poll_gap_max, burst_max, flow_odd; /* per stats interval */
+	u16 flow_min, flow_max;
 
 	struct gip_chunk_buf in;  /* chunked packet being received */
 	struct gip_chunk_buf out; /* chunked packet being sent */

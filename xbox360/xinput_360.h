@@ -37,6 +37,14 @@ void xa_xinput_update(int slot, const struct gip_gamepad_state *s);
  * left/right are 0..100 (gip_set_rumble's scale). */
 bool xa_xinput_take_rumble(int slot, u8 *left, u8 *right);
 
+/* a headset's microphone as a player's voice device in XAM (on the XAM thread, so
+ * asynchronous): bind 0 = queued; voice_user is the bound player, -1 = none; voice_wanted
+ * the player it belongs to (our first controller's) */
+int xa_xinput_voice_bind(void);
+void xa_xinput_voice_unbind(void);
+int xa_xinput_voice_user(void);
+int xa_xinput_voice_wanted(void);
+
 /* on-screen notifications, shown by the XAM thread; "starting" is shown when it starts */
 enum {
 	XA_NOTIFY_STARTING, XA_NOTIFY_READY, XA_NOTIFY_NO_FIRMWARE, XA_NOTIFY_NO_FIRMWARE_02FE,

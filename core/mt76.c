@@ -412,12 +412,17 @@ static int send_firmware_part(struct xa_mt *mt, u32 offset, const u8 *data, u32 
 		xa_mt_write(mt, MT_FCE_DMA_LEN | MT_VEND_TYPE_CFG, chunk_len << 16);
 
 		err = xa_mt_send_command(mt, msg, 0);
-		if (err)
+		if (err) {
+			xa_log("mt76: firmware chunk %x not sent: %d\n", offset + pos, err);
 			return err;
+		}
 
 		if (!poll_register(mt, MT_FCE_DMA_LEN | MT_VEND_TYPE_CFG, 0xffffffff,
-				   0xc0000000 | (chunk_len << 16)))
+				   0xc0000000 | (chunk_len << 16))) {
+			xa_log("mt76: firmware chunk %x not taken (dma len %08x)\n", offset + pos,
+			       xa_mt_read(mt, MT_FCE_DMA_LEN | MT_VEND_TYPE_CFG));
 			return -XA_ETIMEDOUT;
+		}
 	}
 
 	return 0;
@@ -952,6 +957,20 @@ int xa_mt_send_assoc_response(struct xa_mt *mt, const u8 *addr)
 	put_le16(p + 2, 0x0110);
 	put_le16(p + 4, 0x0f00);
 	memset(xa_msg_put(msg, 8), 0, 8);
+	return send_wlan(mt, msg);
+}
+
+int xa_mt_send_disassoc(struct xa_mt *mt, const u8 *addr)
+{
+	struct xa_msg *msg = xa_msg_alloc(IEEE80211_HDR_3ADDR_LEN + 2);
+
+	if (!msg)
+		return -XA_ENOMEM;
+
+	put_hdr_3addr(xa_msg_put(msg, IEEE80211_HDR_3ADDR_LEN),
+		      IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_DISASSOC, addr, mt->address,
+		      mt->address);
+	put_le16(xa_msg_put(msg, 2), 0x0008); /* reason: the station left */
 	return send_wlan(mt, msg);
 }
 
