@@ -4,6 +4,7 @@
 
 #include "../core/platform.h"
 #include "detour.h"
+#include "voice_360.h"
 #include "xinput_360.h"
 
 #define BARRIER() __asm__ __volatile__("lwsync" ::: "memory")
@@ -36,7 +37,7 @@ static const u32 XAM_BIND_SIG[2] = { 0x7c8b2378, 0x7ca42b78 };
 #define XAM_THREAD_FLAGS (0x2 | (1u << 4) << 24)
 #define XAM_THREAD_STACK 0x4000
 #define XAM_QUEUE 16 /* requests: driver thread -> XAM thread (single producer/consumer) */
-enum { REQ_BIND = 1, REQ_UNBIND, REQ_GUIDE, REQ_NOTIFY };
+enum { REQ_BIND = 1, REQ_UNBIND, REQ_GUIDE, REQ_NOTIFY, REQ_VOICE_BIND, REQ_VOICE_UNBIND };
 
 /* On-screen notifications (XNotifyQueueUI, xam ord 656 in every XAM version hiddriver360 supports).
  * Its prototype is (type, user index, u64 areas, text, context): the u64 is the third
@@ -58,6 +59,14 @@ static u16 notify_wide[XA_NOTIFY_COUNT][40]; /* kept alive: the queue may hold t
 /* our device contexts and controller ids, as hiddriver360 picks them */
 #define CONTEXT_BASE 0x10000005
 #define CONTROLLER_ID_BASE 0xa7553952
+
+/* A headset's microphone is bound as a standalone voice device in XAM's chat category
+ * (1), as usb-audio-x360 (TimeoutTim) does it: context family 4 is XVoiced's standalone
+ * voice device, its low bits the slot. Only player 1 for now; the pads stay in category 0. */
+#define VOICE_ID (CONTROLLER_ID_BASE + 4)
+#define VOICE_CONTEXT 0x40000000
+#define VOICE_CATEGORY 1
+static volatile u32 voice_user = 0xff; /* bound player, 0xff = none; set on the XAM thread */
 
 /* XINPUT_GAMEPAD (big-endian native, 12 bytes) */
 struct xinput_gamepad {
@@ -84,6 +93,7 @@ struct xinput_gamepad {
 
 #define XI_DEVTYPE_GAMEPAD 1
 #define XI_DEVSUBTYPE_GAMEPAD 1
+#define XI_CAPS_VOICE_SUPPORTED 0x0004 /* a headset is on this player's controller */
 /* ERROR_SUCCESS, ERROR_DEVICE_NOT_CONNECTED, ERROR_INVALID_PARAMETER: from xboxkrnl_types.h */
 
 struct xpad {
@@ -206,6 +216,9 @@ HOOK u32 XaCapsHookC(u32 unk, u32 user, u32 flags, void *caps)
 	memset(c, 0, 4 + sizeof(struct xinput_gamepad) + 4);
 	c[0] = XI_DEVTYPE_GAMEPAD;
 	c[1] = XI_DEVSUBTYPE_GAMEPAD;
+	/* titles look here for a player's headset; ours runs while its microphone does */
+	if (user == voice_user && xa_voice_live())
+		c[3] = XI_CAPS_VOICE_SUPPORTED;
 	return ERROR_SUCCESS;
 }
 
@@ -334,6 +347,7 @@ void xa_xinput_release(void)
 {
 	for (int i = 0; i < 4; i++)
 		xa_xinput_unbind(i);
+	xa_xinput_voice_unbind();
 	for (int i = 0; i < 100 && xam_running && xam_tail != xam_head; i++)
 		xa_sleep_ms(10);
 	xa_xinput_shutdown();
@@ -380,6 +394,66 @@ static void do_unbind(int slot)
 	xa_log("xinput: pad %d unbound\n", slot);
 }
 
+int xa_xinput_voice_bind(void)
+{
+	return pXamUserBind && xam_request(REQ_VOICE_BIND, 0) ? 0 : -1;
+}
+
+void xa_xinput_voice_unbind(void)
+{
+	if (voice_user != 0xff)
+		xam_request(REQ_VOICE_UNBIND, 0);
+}
+
+int xa_xinput_voice_user(void)
+{
+	return voice_user == 0xff ? -1 : (int)voice_user;
+}
+
+/* the player the microphone belongs to: that of our first controller, as a headset sits on
+ * its player's controller; player 1 while none is there */
+int xa_xinput_voice_wanted(void)
+{
+	for (int i = 0; i < 4; i++)
+		if (g_xpad[i].active)
+			return (int)g_xpad[i].user_index;
+	return 0;
+}
+
+/* XAM thread. The context's low bits are the player's slot in XAM's voice route. */
+static void do_voice_bind(void)
+{
+	u8 want = (u8)xa_xinput_voice_wanted(), user = want;
+	int st;
+
+	if (voice_user != 0xff)
+		return;
+	st = pXamUserBind(VOICE_ID, VOICE_CONTEXT | want, VOICE_CATEGORY, 0, &user);
+	if (st < 0 || user != want) {
+		/* another player's slot would put the voice on the wrong profile */
+		if (st >= 0)
+			pXamUserBind(VOICE_ID, VOICE_CONTEXT | want, VOICE_CATEGORY, 1, 0);
+		xa_log("xinput: headset microphone not bound (status %d, user %d, wanted %d)\n",
+		       st, user, want);
+		return;
+	}
+	voice_user = user;
+	BARRIER();
+	xa_log("xinput: headset microphone bound to user %d\n", user);
+}
+
+static void do_voice_unbind(void)
+{
+	u32 user = voice_user;
+
+	if (user == 0xff)
+		return;
+	voice_user = 0xff;
+	BARRIER();
+	pXamUserBind(VOICE_ID, VOICE_CONTEXT | user, VOICE_CATEGORY, 1, 0);
+	xa_log("xinput: headset microphone unbound\n");
+}
+
 void xa_xinput_notify(int msg)
 {
 	if (msg >= 0 && msg < XA_NOTIFY_COUNT && !xam_request(REQ_NOTIFY, msg))
@@ -422,6 +496,10 @@ HOOK u32 XaXamThreadC(void *context)
 				pGuideCallback(CONTEXT_BASE + slot, 0, 0);
 			else if (r >> 8 == REQ_NOTIFY)
 				do_notify((int)(r & 0xff));
+			else if (r >> 8 == REQ_VOICE_BIND)
+				do_voice_bind();
+			else if (r >> 8 == REQ_VOICE_UNBIND)
+				do_voice_unbind();
 		}
 		xa_sleep_ms(10);
 	}

@@ -57,5 +57,17 @@ int main(void)
 		 pcm_downmix(0, 0, -1000) == -708 && pcm_downmix(30000, 30000, 30000) == 32767 &&
 		 pcm_downmix(-30000, -30000, -30000) == -32767;
 	printf("%s downmix\n", dm ? "ok  " : "FAIL");
-	return fails != 0 || !dm;
+
+	/* 24 -> 16 kHz: a ramp stays a ramp at the new spacing; 192 samples (8 ms) give 128 */
+	s16 in[192], out[128];
+	int rs = 1;
+
+	for (int i = 0; i < 192; i++)
+		in[i] = (s16)(i * 30 - 3000);
+	rs &= pcm_24k_to_16k(in, 192, out) == 128;
+	for (int k = 0; k < 128; k++)
+		rs &= out[k] == (s16)((k * 3 / 2.0) * 30 - 3000);
+	rs &= pcm_24k_to_16k(in, 2, out) == 0;
+	printf("%s 24 to 16 kHz\n", rs ? "ok  " : "FAIL");
+	return fails != 0 || !dm || !rs;
 }

@@ -34,6 +34,10 @@ u32 xa_audio_read(s16 *lr, u32 frames);
 u32 xa_audio_available(void);
 void xa_audio_stats(u32 *callbacks, u32 *overruns, u32 *failures);
 
+/* a headset's microphone: mono 16-bit little-endian samples at khz, for the host's voice
+ * chat (ignored where there is none) */
+void xa_voice_mic(const u8 *pcm_le, u32 bytes, u32 khz);
+
 void xa_sleep_ms(unsigned int ms);
 u64 xa_now_ms(void);
 void xa_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

@@ -70,6 +70,11 @@ void xa_audio_stats(u32 *callbacks, u32 *overruns, u32 *failures)
 	*callbacks = *overruns = *failures = 0;
 }
 
+void xa_voice_mic(const u8 *pcm_le, u32 bytes, u32 khz)
+{
+	(void)pcm_le, (void)bytes, (void)khz;
+}
+
 void xa_sleep_ms(unsigned int ms)
 {
 	struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000 };

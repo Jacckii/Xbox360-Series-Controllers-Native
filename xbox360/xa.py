@@ -166,6 +166,17 @@ def status_addr(name=None):
     return pe_va(os.path.join(OUT, (name or loaded_name()) + ".exe"), b"XA36")
 
 
+def find_status(x, hint):
+    """the block's address on the console, when out/ holds a different build than the one
+    loaded: search .data around the expected address for the magic"""
+    for base in range((hint & ~0xFFF) - 0x10000, (hint & ~0xFFF) + 0x10000, 0x1000):
+        b = x.mem(base, 0x1000)
+        for off in range(0, len(b or b""), 4):
+            if b[off:off + 4] == b"XA36" and read_status(x, base + off):
+                return base + off
+    return None
+
+
 def wait_for(what, secs, pred):
     for _ in range(int(secs * 4)):
         try:
@@ -341,6 +352,10 @@ def main():
             try:
                 x = Xbdm()
                 s = read_status(x, addr)
+                if s is None and (found := find_status(x, addr)):
+                    print(f"(status block at {found:08x}: the console runs another build "
+                          f"than out/)")
+                    addr, s = found, read_status(x, found)
                 if s is None:
                     print(f"xa status block not found at {addr:08x} (plugin loaded?)")
                 else:

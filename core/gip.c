@@ -722,6 +722,9 @@ static int handle_audio_samples(struct gip_client *gc, const u8 *data, u32 len)
 		xa_log("gip: client %d audio samples: %u bytes (%u packets)\n", gc->xc->wcid, len,
 		       gc->audio_rx);
 	gc->audio_started = true;
+	/* after the flow rate: the microphone's samples, for the host's voice chat */
+	if (len > 2 && (gc->audio_in & 1))
+		xa_voice_mic(data + 2, len - 2, format_khz(gc->audio_in));
 	return 0;
 }
 
